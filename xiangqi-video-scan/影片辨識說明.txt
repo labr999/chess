@@ -1,4 +1,4 @@
-象棋影片自動覆盤 v1.0（2026-11-04）
+象棋影片自動覆盤 v1.1（2026-11-04）
 =====================================
 
 做什麼
@@ -7,8 +7,8 @@
 
 怎麼用
   1. 同步 Google Drive 的 xiangqi_web_demo 資料夾到電腦。
-  2. 雙擊 run_video_scan.bat，第一次會自動安裝套件。
-  3. 貼上播放清單網址（例如「後手」清單），按 Enter。
+  2. 雙擊 run_video_scan.bat，會自動安裝／更新套件（含 deno，不必另外裝）。
+  3. 選 1「後手」或 2「重點棋譜」，或貼上其他有 list= 的清單網址（可存成新選項）。
   4. 跑完會自動打開 video_results 資料夾。
 
   第一次建議先試 3 支：
@@ -47,5 +47,10 @@
   --redo           已處理過的也重做
 
 檔案
-  video_scan.py、xq_core.py、run_video_scan.bat、requirements_video.txt
+  video_scan.py、xq_core.py、run_video_scan.bat、requirements_video.txt、playlists.json（清單選單，可自己編輯）
   （需要 engine\Pikafish-Windows-x86-64-universal.exe 與 pikafish.nnue，已在 engine 資料夾）
+
+更新紀錄
+  v1.1  bat 改純英文（修正中文 bat 在 cmd 斷行亂掉、誤執行 winget）；deno 改用 pip 安裝；
+        啟動時列出清單選單；貼到「所有播放清單」總覽頁會提示；私人清單讀不到時才問瀏覽器。
+  v1.0  第一版。

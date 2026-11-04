@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.0'
+VERSION = '1.1'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -51,8 +51,25 @@ def log(*a):
 # 下載
 # ====================================================================
 
+_DENO = None
+
+
+def deno_path():
+    """yt-dlp 下載 YouTube 需要 deno；用 pip 安裝的 deno 套件，不必另外裝。"""
+    global _DENO
+    if _DENO is None:
+        try:
+            from deno import find_deno_bin
+            _DENO = find_deno_bin() or ''
+        except Exception:
+            _DENO = ''
+    return _DENO
+
+
 def _ydl_opts(args, extra=None):
     o = {'quiet': True, 'no_warnings': True, 'ignoreerrors': True}
+    if deno_path():
+        o['js_runtimes'] = {'deno': {'path': deno_path()}}
     if args.browser:
         o['cookiesfrombrowser'] = (args.browser,)
     if args.cookies:
@@ -591,6 +608,41 @@ def process(video, path, out_dir, engine, args):
     return 'ok', rows
 
 
+PRESET_FILE = os.path.join(BASE_DIR, 'playlists.json')
+DEFAULT_PRESETS = [
+    {'name': '後手', 'url': 'https://www.youtube.com/playlist?list=PLIoeW_p5UU0jDMbfjILRHWZUP8aRnwDMY'},
+    {'name': '重點棋譜', 'url': 'https://www.youtube.com/playlist?list=PLIoeW_p5UU0hP8DtL-zoGEK45Q2iveh0U'},
+]
+
+
+def ask_url():
+    if not os.path.exists(PRESET_FILE):
+        json.dump(DEFAULT_PRESETS, open(PRESET_FILE, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+    presets = json.load(open(PRESET_FILE, encoding='utf-8'))
+    while True:
+        log('\n要處理哪個播放清單？')
+        for i, p in enumerate(presets, 1):
+            log('  %d. %s' % (i, p['name']))
+        log('  或直接貼上播放清單／影片網址')
+        a = input('請輸入編號或網址：').strip().strip('"')
+        if a.isdigit() and 1 <= int(a) <= len(presets):
+            return presets[int(a) - 1]['url']
+        if 'feed/playlists' in a:
+            log('這是「所有播放清單」總覽頁，不是單一清單。請點進某個清單，'
+                '複製網址列裡有 list= 的那一串。')
+            continue
+        if 'list=' in a or 'watch?v=' in a or 'youtu.be/' in a or '/shorts/' in a:
+            if 'list=' in a:
+                lid = re.search(r'list=([\w-]+)', a).group(1)
+                if not any(lid in p['url'] for p in presets):
+                    nm = input('要把這個清單存起來下次直接選嗎？輸入名稱（Enter 跳過）：').strip()
+                    if nm:
+                        presets.append({'name': nm, 'url': 'https://www.youtube.com/playlist?list=' + lid})
+                        json.dump(presets, open(PRESET_FILE, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+            return a
+        log('看不懂這個輸入，請再試一次。')
+
+
 def main():
     ap = argparse.ArgumentParser(description='象棋影片自動覆盤 v' + VERSION)
     ap.add_argument('url', nargs='?', help='YouTube 播放清單或影片網址')
@@ -610,7 +662,7 @@ def main():
     ap.add_argument('--redo', action='store_true', help='已處理過的也重做')
     args = ap.parse_args()
     if not args.url and not args.local:
-        args.url = input('請貼上 YouTube 播放清單或影片網址：').strip().strip('"')
+        args.url = ask_url()
     os.makedirs(args.out, exist_ok=True)
     os.makedirs(args.cache, exist_ok=True)
     done_path = os.path.join(args.out, '已處理.json')
@@ -632,7 +684,17 @@ def main():
                    'url': p, 'path': p} for p in files]
         log('本機影片 %d 支' % len(videos))
     else:
-        title, videos = list_videos(args.url, args)
+        try:
+            title, videos = list_videos(args.url, args)
+        except Exception as e:
+            if args.browser or args.cookies:
+                raise
+            log('讀不到清單（%s）' % e)
+            br = input('如果是私人清單，輸入要借用登入的瀏覽器 firefox / edge / chrome（直接 Enter 結束）：').strip().lower()
+            if not br:
+                return
+            args.browser = br
+            title, videos = list_videos(args.url, args)
         log('「%s」共 %d 支影片' % (title, len(videos)))
     if args.limit:
         videos = videos[:args.limit]
