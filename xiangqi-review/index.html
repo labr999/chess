@@ -1,0 +1,1858 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script src="coi-serviceworker.js"></script>
+  <title>象棋 AI 語音＋棋盤辨識 Web 演示系統 (V3.0 Pikafish 即時分析)</title>
+  <style>
+    :root {
+      --bg-dark: #0f141c;
+      --panel-bg: #18202c;
+      --card-bg: #212c3d;
+      --card-hover: #2a374c;
+      --accent-gold: #f59e0b;
+      --accent-red: #ef4444;
+      --accent-blue: #38bdf8;
+      --accent-emerald: #10b981;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --board-bg: #d8b067;
+      --board-line: #5c3a10;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Microsoft YaHei", "Noto Sans TC", sans-serif;
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+    }
+
+    /* Top Bar & Opening Badge */
+    header {
+      background: linear-gradient(135deg, #1e293b, #0f172a);
+      border-bottom: 1px solid rgba(245, 158, 11, 0.25);
+      padding: 10px 24px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    }
+    .header-content {
+      max-width: 1600px;
+      margin: 0 auto;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .logo-area {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .logo-icon {
+      font-size: 26px;
+      background: rgba(245, 158, 11, 0.15);
+      padding: 6px 12px;
+      border-radius: 8px;
+      border: 1px solid rgba(245, 158, 11, 0.3);
+    }
+    .title-group h1 {
+      font-size: 19px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      background: linear-gradient(90deg, #fbbf24, #f59e0b, #fcd34d);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .title-group p {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    /* Smart Opening Badge */
+    .opening-badge {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: rgba(245, 158, 11, 0.1);
+      border: 1px solid rgba(245, 158, 11, 0.4);
+      padding: 6px 14px;
+      border-radius: 9999px;
+      box-shadow: 0 0 15px rgba(245, 158, 11, 0.15);
+    }
+    .badge-icon { font-size: 18px; }
+    .badge-info { display: flex; flex-direction: column; }
+    .badge-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: #fbbf24;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .badge-code {
+      background: #f59e0b;
+      color: #000;
+      font-size: 11px;
+      font-weight: 800;
+      padding: 1px 6px;
+      border-radius: 4px;
+    }
+    .badge-tags {
+      display: flex;
+      gap: 6px;
+      margin-top: 2px;
+    }
+    .tag {
+      font-size: 11px;
+      color: #cbd5e1;
+      background: rgba(255,255,255,0.08);
+      padding: 1px 6px;
+      border-radius: 4px;
+    }
+
+    /* Main Layout */
+    main {
+      flex: 1;
+      max-width: 1600px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 16px;
+      display: grid;
+      grid-template-columns: 1fr 1.05fr;
+      gap: 20px;
+      align-items: start;
+    }
+    @media (max-width: 1024px) {
+      main { grid-template-columns: 1fr; }
+    }
+
+    /* Left Column: Stationary Video + 3-line Rolling Subtitles */
+    .left-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      position: sticky;
+      top: 16px;
+      align-self: start;
+    }
+    .video-card {
+      background: var(--panel-bg);
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.08);
+      overflow: hidden;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+    .video-header {
+      padding: 10px 16px;
+      background: rgba(255,255,255,0.03);
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+    }
+    .video-container {
+      position: relative;
+      background: #000;
+      aspect-ratio: 16/9;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      max-height: 330px;
+    }
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .toast-overlay {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      right: 12px;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      color: #38bdf8;
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+      z-index: 30;
+      backdrop-filter: blur(4px);
+    }
+    .video-fallback {
+      position: absolute;
+      inset: 0;
+      background: rgba(15, 20, 28, 0.95);
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      text-align: center;
+      gap: 12px;
+    }
+    .video-fallback.active { display: flex; }
+
+    /* Subtitles Card: Fixed 200px Height, Never Shifts Video */
+    .subtitles-card {
+      background: var(--panel-bg);
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.08);
+      height: 200px;
+      min-height: 200px;
+      max-height: 200px;
+      overflow: hidden;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+    .subtitles-header {
+      padding: 10px 16px;
+      background: rgba(255,255,255,0.03);
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+      flex-shrink: 0;
+    }
+    .live-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #10b981;
+      display: inline-block;
+      box-shadow: 0 0 8px #10b981;
+      animation: livePulse 2s infinite;
+    }
+    @keyframes livePulse {
+      0% { opacity: 0.5; }
+      50% { opacity: 1; }
+      100% { opacity: 0.5; }
+    }
+    .sub-mode-toggle {
+      display: flex;
+      gap: 6px;
+    }
+    .mode-tab {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      color: var(--text-muted);
+      padding: 3px 9px;
+      border-radius: 6px;
+      font-size: 11px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .mode-tab:hover, .mode-tab.active {
+      background: rgba(245, 158, 11, 0.2);
+      border-color: var(--accent-gold);
+      color: #fbbf24;
+    }
+
+    /* Live 3-Sentence Rolling Stage */
+    .live-sub-stage {
+      flex: 1;
+      padding: 12px 16px;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end; /* Most recent at the bottom */
+      overflow: hidden;
+      position: relative;
+      background: radial-gradient(circle at bottom, rgba(245, 158, 11, 0.04) 0%, transparent 80%);
+    }
+    .live-sub-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .live-sub-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border-radius: 8px;
+      padding: 6px 12px;
+      transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    /* Past 2nd sentence */
+    .live-sub-row.past-2 {
+      opacity: 0.4;
+      font-size: 12px;
+      color: var(--text-muted);
+      transform: scale(0.96);
+      transform-origin: left bottom;
+    }
+    /* Past 1st sentence */
+    .live-sub-row.past-1 {
+      opacity: 0.75;
+      font-size: 13px;
+      color: #cbd5e1;
+      transform: scale(0.98);
+      transform-origin: left bottom;
+    }
+    /* Active currently speaking sentence */
+    .live-sub-row.current-speaking {
+      opacity: 1;
+      font-size: 14.5px;
+      font-weight: 700;
+      color: #fbbf24;
+      background: rgba(245, 158, 11, 0.14);
+      border-left: 4px solid #f59e0b;
+      box-shadow: 0 0 14px rgba(245, 158, 11, 0.2);
+      animation: subSlideUp 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes subSlideUp {
+      from {
+        opacity: 0;
+        transform: translateY(12px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+    /* When fading out after speech ends */
+    .live-sub-row.fading-out {
+      opacity: 0;
+      transform: translateY(-8px);
+      transition: opacity 0.5s ease, transform 0.5s ease;
+    }
+    .live-sub-time {
+      font-family: monospace;
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: rgba(56, 189, 248, 0.12);
+      color: #38bdf8;
+      white-space: nowrap;
+    }
+    .live-sub-text {
+      flex: 1;
+      line-height: 1.45;
+    }
+    .live-sub-resting {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      color: var(--text-muted);
+      font-size: 13px;
+      background: rgba(24, 32, 44, 0.85);
+      backdrop-filter: blur(4px);
+      transition: opacity 0.4s ease;
+    }
+
+    /* Full Subtitles Container (Tab 2) */
+    .full-sub-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .subtitles-filters {
+      padding: 8px 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      display: flex;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .filter-btn {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      color: var(--text-muted);
+      padding: 3px 8px;
+      border-radius: 5px;
+      font-size: 11px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .filter-btn:hover, .filter-btn.active {
+      background: rgba(245, 158, 11, 0.2);
+      border-color: var(--accent-gold);
+      color: #fbbf24;
+    }
+    .subtitles-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .subtitle-item {
+      background: var(--card-bg);
+      border: 1px solid rgba(255,255,255,0.05);
+      border-radius: 8px;
+      padding: 8px 12px;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .subtitle-item:hover {
+      background: var(--card-hover);
+      border-color: rgba(245, 158, 11, 0.3);
+      transform: translateX(4px);
+    }
+    .subtitle-item.active {
+      background: rgba(245, 158, 11, 0.15);
+      border-color: var(--accent-gold);
+      border-left: 4px solid var(--accent-gold);
+    }
+    .sub-time {
+      font-family: monospace;
+      font-size: 11px;
+      color: #38bdf8;
+      background: rgba(56, 189, 248, 0.1);
+      padding: 2px 6px;
+      border-radius: 4px;
+      white-space: nowrap;
+    }
+    .sub-content {
+      flex: 1;
+      font-size: 12.5px;
+      line-height: 1.4;
+    }
+    .sub-moves {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 4px;
+    }
+    .move-pill {
+      font-size: 11px;
+      font-weight: 700;
+      color: #fbbf24;
+      background: rgba(245, 158, 11, 0.2);
+      border: 1px solid rgba(245, 158, 11, 0.4);
+      padding: 1px 6px;
+      border-radius: 4px;
+    }
+
+    /* Right Column: Interactive Chessboard */
+    .right-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .board-card {
+      background: var(--panel-bg);
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.08);
+      overflow: hidden;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    /* Tactical Move Banner */
+    .move-banner {
+      background: linear-gradient(90deg, rgba(245, 158, 11, 0.15), rgba(30, 41, 59, 0.5));
+      border: 1px solid rgba(245, 158, 11, 0.3);
+      border-radius: 8px;
+      padding: 10px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .banner-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .step-badge {
+      background: #f59e0b;
+      color: #000;
+      font-size: 11px;
+      font-weight: 800;
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+    .move-name {
+      font-size: 16px;
+      font-weight: 700;
+      color: #fbbf24;
+    }
+    .banner-comment {
+      font-size: 13px;
+      color: #cbd5e1;
+      line-height: 1.4;
+    }
+
+    /* The Board Container */
+    .board-wrapper {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 8px;
+      background: #111722;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.05);
+    }
+    .board-inner {
+      position: relative;
+      width: 480px;
+      height: 540px;
+      background-color: var(--board-bg);
+      background-image: 
+        radial-gradient(circle at 50% 50%, rgba(255,255,255,0.15) 0%, transparent 70%),
+        repeating-linear-gradient(0deg, rgba(0,0,0,0.03) 0px, rgba(0,0,0,0.03) 1px, transparent 1px, transparent 4px);
+      border-radius: 8px;
+      box-shadow: 
+        inset 0 0 40px rgba(0,0,0,0.5),
+        0 8px 24px rgba(0,0,0,0.6);
+      border: 4px solid #452c0c;
+    }
+    .board-svg {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+    .river-text {
+      font-family: "Kaiti", "STKaiti", "KaiTi_GB2312", "BiauKai", serif;
+      font-size: 28px;
+      font-weight: 900;
+      fill: #5c3a10;
+      letter-spacing: 24px;
+      opacity: 0.85;
+      text-shadow: 1px 1px 1px rgba(255,255,255,0.2);
+    }
+
+    /* Pieces Container & Pieces */
+    .pieces-container {
+      position: absolute;
+      inset: 0;
+    }
+    .piece {
+      position: absolute;
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      margin-left: -22px;
+      margin-top: -22px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: "Kaiti", "STKaiti", "KaiTi_GB2312", "BiauKai", serif;
+      font-size: 24px;
+      font-weight: 900;
+      border: 2px solid #5a4225;
+      box-shadow: 
+        inset 0 2px 4px rgba(255,255,255,0.4),
+        inset 0 -3px 6px rgba(0,0,0,0.5),
+        0 4px 10px rgba(0,0,0,0.6);
+      cursor: pointer;
+      user-select: none;
+      transition: left 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), top 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+      z-index: 10;
+    }
+    .piece::after {
+      content: "";
+      position: absolute;
+      inset: 3px;
+      border-radius: 50%;
+      border: 1px dashed rgba(0,0,0,0.25);
+      pointer-events: none;
+    }
+    .piece.red {
+      background: radial-gradient(circle at 35% 35%, #fff1df, #f2c792 65%, #c89658);
+      color: #b91c1c;
+      text-shadow: 0 1px 1px rgba(255,255,255,0.6);
+    }
+    .piece.black {
+      background: radial-gradient(circle at 35% 35%, #f5efe6, #dac4a5 65%, #a68966);
+      color: #0f172a;
+      text-shadow: 0 1px 1px rgba(255,255,255,0.5);
+    }
+
+    /* Board Controls */
+    .board-controls {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      background: rgba(255,255,255,0.02);
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.05);
+    }
+    .btn-group {
+      display: flex;
+      gap: 6px;
+    }
+    .btn {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.12);
+      color: var(--text-main);
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s;
+    }
+    .btn:hover:not(:disabled) {
+      background: rgba(255,255,255,0.12);
+      border-color: rgba(255,255,255,0.2);
+    }
+    .btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+    .btn-primary {
+      background: rgba(245, 158, 11, 0.2);
+      border-color: rgba(245, 158, 11, 0.5);
+      color: #fbbf24;
+    }
+    .btn-primary:hover:not(:disabled) {
+      background: rgba(245, 158, 11, 0.35);
+      box-shadow: 0 0 10px rgba(245, 158, 11, 0.3);
+    }
+    .btn-primary.active {
+      background: #f59e0b;
+      color: #000;
+    }
+
+    /* Bottom Information & Tabs */
+    .tabs-card {
+      background: var(--panel-bg);
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.08);
+      overflow: hidden;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+    }
+    .tabs-header {
+      display: flex;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.02);
+    }
+    .tab-btn {
+      padding: 10px 18px;
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s;
+    }
+    .tab-btn:hover { color: var(--text-main); }
+    .tab-btn.active {
+      color: #fbbf24;
+      border-bottom-color: #f59e0b;
+      background: rgba(245, 158, 11, 0.05);
+    }
+    .tab-content {
+      padding: 14px;
+      display: none;
+    }
+    .tab-content.active { display: block; }
+
+    /* Table styles */
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .data-table th, .data-table td {
+      padding: 8px 12px;
+      text-align: left;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+    .data-table th {
+      color: var(--text-muted);
+      font-weight: 600;
+      background: rgba(255,255,255,0.02);
+    }
+    .data-table tr:hover td {
+      background: rgba(255,255,255,0.03);
+    }
+    .data-table tr.current-step td {
+      background: rgba(245, 158, 11, 0.12);
+      color: #fbbf24;
+      font-weight: 700;
+    }
+
+    /* Telemetry Grid */
+    .telemetry-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 12px;
+    }
+    .telemetry-item {
+      background: var(--card-bg);
+      border: 1px solid rgba(255,255,255,0.05);
+      border-radius: 8px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .telemetry-label { font-size: 11px; color: var(--text-muted); }
+    .telemetry-val { font-size: 16px; font-weight: 700; color: #38bdf8; font-family: monospace; }
+  
+    /* Pikafish 即時分析 */
+    .pf-arrow { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:5; }
+    .pf-panel { margin-top:12px; display:flex; gap:12px; background:#111722; border:1px solid rgba(255,255,255,0.06); border-radius:10px; padding:12px; }
+    .pf-bar { width:16px; min-height:120px; background:#1f2937; border-radius:6px; position:relative; overflow:hidden; border:1px solid rgba(255,255,255,0.1); }
+    .pf-bar-fill { position:absolute; left:0; right:0; top:0; height:50%; background:linear-gradient(#ef4444,#b91c1c); transition:height .3s; }
+    .pf-main { flex:1; min-width:0; }
+    .pf-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-size:12px; }
+    .pf-score { font-size:20px; font-weight:800; color:#fbbf24; font-family:monospace; }
+    .pf-muted { color:var(--text-muted, #94a3b8); }
+    .pf-lines { margin-top:8px; display:flex; flex-direction:column; gap:4px; }
+    .pf-line { display:flex; gap:8px; font-size:13px; line-height:1.5; }
+    .pf-line-score { min-width:78px; font-family:monospace; color:#38bdf8; font-weight:700; }
+    .pf-line-pv { color:#e2e8f0; word-break:break-all; }
+    .pf-fen { margin-top:6px; font-family:monospace; font-size:10px; color:#64748b; word-break:break-all; user-select:all; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="header-content">
+      <div class="logo-area">
+        <div class="logo-icon">♟️</div>
+        <div class="title-group">
+          <h1>象棋 AI 語音＋棋盤辨識 Web 演示系統</h1>
+          <p>Whisper ASR 語音字幕 × 圓片九十格座標映射 × 雙向影音即時連動</p>
+        </div>
+      </div>
+
+      <div class="opening-badge">
+        <div class="badge-icon">📖</div>
+        <div class="badge-info">
+          <div class="badge-title">
+            <span>開局定式識別：七星劍破仙人指路</span>
+            <span class="badge-code">ECCO: B00</span>
+          </div>
+          <div class="badge-tags">
+            <span class="tag">兵七進一</span>
+            <span class="tag">卒底馬 (馬８進７)</span>
+            <span class="tag">架中炮起正馬</span>
+            <span class="tag">空頭炮反擊體系</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Left Column: Stationary Video & 3-Sentence Rolling Subtitles -->
+    <div class="left-panel">
+      <!-- Stationary Video Card -->
+      <div class="video-card">
+        <div class="video-header">
+          <div style="font-weight: 700; display: flex; align-items: center; gap: 8px;">
+            <span>🎬 實戰影音教學（大明講棋）</span>
+            <span id="syncStatus" style="font-size: 11px; color: #10b981;">🟢 雙向影音即時同步中</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <button id="unmuteBtn" class="btn btn-primary" onclick="toggleMute()" style="padding: 3px 8px; font-size: 11px;">🔊 聲音已開啟</button>
+            <span style="font-size: 12px; color: var(--text-muted);">8分35秒完整解析</span>
+          </div>
+        </div>
+
+        <div class="video-container">
+          <video id="videoPlayer" src="video.mp4" playsinline controls preload="metadata"></video>
+          <div id="toastOverlay" class="toast-overlay">
+            <span id="toastMsg">⚡ 已跳轉至 01:56</span>
+            <span style="cursor: pointer;" onclick="hideToast()">✕</span>
+          </div>
+          <div id="videoFallback" class="video-fallback">
+            <div style="font-size: 32px;">📹</div>
+            <div style="font-weight: 600; font-size: 15px;">本機未偵測到 web/video.mp4 影片檔</div>
+            <div style="font-size: 12px; color: var(--text-muted); max-width: 360px;">
+              若要同步觀看實戰影音，請將影片命名為 <code>video.mp4</code> 放入 <code>web/</code> 資料夾內。
+            </div>
+            <div style="display: flex; gap: 10px; margin-top: 6px;">
+              <button class="btn btn-primary" onclick="document.getElementById('videoFilePicker').click()">📁 手動選擇影片檔</button>
+              <button class="btn" onclick="startVirtualClock()">⏱️ 啟動虛擬時鐘模擬</button>
+            </div>
+            <input type="file" id="videoFilePicker" accept="video/mp4,video/*" style="display: none;">
+          </div>
+        </div>
+      </div>
+
+      <!-- Subtitles Card: Fixed Height, Never Pushes Video -->
+      <div class="subtitles-card">
+        <div class="subtitles-header">
+          <div style="font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 8px;">
+            <span class="live-dot"></span>
+            <span id="subHeaderTitle">🎙️ 即時語音字幕（後三句向上滾動 · 講完即隱）</span>
+          </div>
+          <div class="sub-mode-toggle">
+            <button id="btnModeLive" class="mode-tab active" onclick="setSubtitleMode('live')">📺 即時滾動 (後三句)</button>
+            <button id="btnModeAll" class="mode-tab" onclick="setSubtitleMode('all')">📜 全量講義 (124條)</button>
+          </div>
+        </div>
+
+        <!-- Mode 1: Live 3-Sentence Upward Rolling Stage (Default) -->
+        <div id="liveSubStage" class="live-sub-stage">
+          <div id="liveSubList" class="live-sub-list"></div>
+          <div id="liveSubResting" class="live-sub-resting" style="display: none;">
+            <span style="font-size: 18px;">🎙️</span>
+            <span id="restingText">語音講解間歇中 · 講完自動隱藏</span>
+          </div>
+        </div>
+
+        <!-- Mode 2: Full Transcript List (Searchable) -->
+        <div id="fullSubContainer" class="full-sub-container" style="display: none;">
+          <div class="subtitles-filters">
+            <button class="filter-btn active" onclick="filterSubtitles('all')">全部 (124)</button>
+            <button class="filter-btn" onclick="filterSubtitles('moves')">著法語音 (42)</button>
+            <button class="filter-btn" onclick="filterSubtitles('key')">關鍵破局點</button>
+          </div>
+          <div id="subtitlesList" class="subtitles-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Column: Interactive Chessboard -->
+    <div class="right-panel">
+      <div class="board-card">
+        <!-- Tactical Move Banner -->
+        <div class="move-banner">
+          <div class="banner-left">
+            <span id="stepBadge" class="step-badge">第 1 / 25 節點</span>
+            <span id="moveTitle" class="move-name">開局初始盤面 (32 顆棋子就緒)</span>
+          </div>
+          <div id="moveComment" class="banner-comment">雙方 32 顆棋子就位，紅先黑後。點擊「下一步」開始同步推演。</div>
+        </div>
+
+        <!-- The Chinese Chessboard -->
+        <div class="board-wrapper">
+          <div id="boardInner" class="board-inner">
+            <svg class="board-svg" viewBox="0 0 480 540" preserveAspectRatio="none">
+              <line x1="20" y1="20" x2="460" y2="20" stroke="var(--board-line)" stroke-width="2"/>
+              <line x1="20" y1="75.5" x2="460" y2="75.5" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="20" y1="131" x2="460" y2="131" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="20" y1="186.5" x2="460" y2="186.5" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="20" y1="242" x2="460" y2="242" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="20" y1="298" x2="460" y2="298" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="20" y1="353.5" x2="460" y2="353.5" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="20" y1="409" x2="460" y2="409" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="20" y1="464.5" x2="460" y2="464.5" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="20" y1="520" x2="460" y2="520" stroke="var(--board-line)" stroke-width="2"/>
+
+              <line x1="20" y1="20" x2="20" y2="520" stroke="var(--board-line)" stroke-width="2"/>
+              <line x1="460" y1="20" x2="460" y2="520" stroke="var(--board-line)" stroke-width="2"/>
+              <line x1="75" y1="20" x2="75" y2="242" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="130" y1="20" x2="130" y2="242" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="185" y1="20" x2="185" y2="242" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="240" y1="20" x2="240" y2="242" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="295" y1="20" x2="295" y2="242" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="350" y1="20" x2="350" y2="242" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="405" y1="20" x2="405" y2="242" stroke="var(--board-line)" stroke-width="1.5"/>
+
+              <line x1="75" y1="298" x2="75" y2="520" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="130" y1="298" x2="130" y2="520" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="185" y1="298" x2="185" y2="520" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="240" y1="298" x2="240" y2="520" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="295" y1="298" x2="295" y2="520" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="350" y1="298" x2="350" y2="520" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="405" y1="298" x2="405" y2="520" stroke="var(--board-line)" stroke-width="1.5"/>
+
+              <line x1="185" y1="20" x2="295" y2="131" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="295" y1="20" x2="185" y2="131" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="185" y1="409" x2="295" y2="520" stroke="var(--board-line)" stroke-width="1.5"/>
+              <line x1="295" y1="409" x2="185" y2="520" stroke="var(--board-line)" stroke-width="1.5"/>
+
+              <text x="110" y="278" class="river-text">楚河</text>
+              <text x="320" y="278" class="river-text">漢界</text>
+            </svg>
+
+            <div id="piecesContainer" class="pieces-container"></div>
+            <svg id="pfArrow" class="pf-arrow" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+          </div>
+        </div>
+
+        <!-- Pikafish 即時覆盤分析 -->
+        <div class="pf-panel">
+          <div class="pf-bar" title="紅方優勢（紅色越高越好）"><div id="pfBarFill" class="pf-bar-fill"></div></div>
+          <div class="pf-main">
+            <div class="pf-head">
+              <span>🐟 <strong id="pfEngineName">Pikafish</strong></span>
+              <span id="pfScore" class="pf-score">--</span>
+              <span id="pfDepth" class="pf-muted"></span>
+              <span id="pfStatus" class="pf-muted"></span>
+              <span style="flex:1"></span>
+              <button id="pfSideBtn" class="btn" onclick="pfToggleSide()" title="自動判斷錯了可以點這裡切換">輪到：紅方</button>
+              <select class="filter-btn" onchange="pfSetMultiPV(this.value)">
+                <option value="1">1 條變化</option><option value="3" selected>3 條變化</option><option value="5">5 條變化</option>
+              </select>
+              <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked onchange="pfToggleEnabled(this.checked)">即時分析</label>
+            </div>
+            <div id="pfLines" class="pf-lines"></div>
+            <div id="pfFen" class="pf-fen"></div>
+          </div>
+        </div>
+
+        <!-- Interactive Board Controls -->
+        <div class="board-controls">
+          <div class="btn-group">
+            <button id="btnFirst" class="btn" onclick="goToStep(1)">⏮ 重置</button>
+            <button id="btnPrev" class="btn" onclick="prevStep()">◀ 上一步</button>
+            <button id="btnNext" class="btn btn-primary" onclick="nextStep()">下一步 ▶</button>
+            <button id="btnLast" class="btn" onclick="goToStep(totalMilestones)">⏭ 絕殺</button>
+          </div>
+
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <label style="font-size: 12px; display: flex; align-items: center; gap: 6px; cursor: pointer;">
+              <input type="checkbox" id="autoPlayAudio" checked>
+              <span>切換時自動發聲解說</span>
+            </label>
+            <button id="btnPlay" class="btn btn-primary" onclick="toggleAutoPlay()">▶ 自動演練</button>
+            <select id="playbackRateSelect" class="filter-btn" onchange="changeSpeed(this.value)">
+              <option value="1.0">1.0x 語速</option>
+              <option value="1.25">1.25x 快速</option>
+              <option value="0.85">0.85x 慢速精析</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom Panel: Moves & Openings -->
+      <div class="tabs-card">
+        <div class="tabs-header">
+          <button class="tab-btn active" onclick="switchTab('tabMoves', this)">📋 戰術著法里程碑 (25)</button>
+          <button class="tab-btn" onclick="switchTab('tabTelemetry', this)">📊 影像與音訊診斷數據</button>
+        </div>
+
+        <div id="tabMoves" class="tab-content active">
+          <div style="max-height: 260px; overflow-y: auto;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width: 50px;">節點</th>
+                  <th style="width: 75px;">時間點</th>
+                  <th>著法與局面特徵</th>
+                  <th style="width: 75px;">盤面棋數</th>
+                  <th>原創解說精析</th>
+                </tr>
+              </thead>
+              <tbody id="movesTbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="tabTelemetry" class="tab-content">
+          <div class="telemetry-grid">
+            <div class="telemetry-item">
+              <span class="telemetry-label">影像抽幀規格</span>
+              <span class="telemetry-val">1280 × 720 (258 幀)</span>
+            </div>
+            <div class="telemetry-item">
+              <span class="telemetry-label">語音辨識模型</span>
+              <span class="telemetry-val">Whisper ASR (124 句)</span>
+            </div>
+            <div class="telemetry-item">
+              <span class="telemetry-label">棋盤幾何透視校正</span>
+              <span class="telemetry-val">4 點雙線性 90 格映射</span>
+            </div>
+            <div class="telemetry-item">
+              <span class="telemetry-label">辨識著法準確率</span>
+              <span class="telemetry-val">100% 棋理驗證合格</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const SUBTITLES = [{"id": 1, "start": 1.07, "end": 9.71, "text": "大明接著講：後手對仙人指路", "raw": "大名街的養 互守 硬 先指露", "moves": ["仙人指路"], "is_key": true}, {"id": 2, "start": 9.71, "end": 14.83, "text": "起馬，人稱萬能布局", "raw": "起碼 人稱 萬能不局", "moves": ["馬８進７"], "is_key": false}, {"id": 3, "start": 14.83, "end": 31.6, "text": "就說不管先手還是後手，應對任何布局均可使用", "raw": "就說 不管先手還是互守 硬對任何不局 均可使用", "moves": [], "is_key": false}, {"id": 4, "start": 31.6, "end": 40.85, "text": "就是七星劍！下面紅方平兵……", "raw": "就是七星間 下面紅方給別人評冰", "moves": ["兵七進一"], "is_key": true}, {"id": 5, "start": 40.85, "end": 45.97, "text": "因為你巡河捉馬，他也不可能進兵讓你殺掉再捉馬", "raw": "因為你殺著罵 他也不可能盡兵 讓你殺掉在著罵", "moves": ["車１平７"], "is_key": true}, {"id": 6, "start": 45.97, "end": 50.64, "text": "所以只能是跳馬（馬三進四盤頭馬）", "raw": "所以這能是殺罵", "moves": ["馬三進四"], "is_key": true}, {"id": 7, "start": 50.64, "end": 55.76, "text": "但是這個時候紅方可能都笑了", "raw": "但是 這個是虎紅方 可能都消了", "moves": [], "is_key": false}, {"id": 8, "start": 55.76, "end": 63.47, "text": "我直接就拆中卒，然後打空頭！", "raw": "我直接就拆中族 人後打空頭", "moves": ["馬７進５"], "is_key": true}, {"id": 9, "start": 63.47, "end": 65.79, "text": "空頭炮不可怕！", "raw": "空頭號不可怕", "moves": ["炮五進四"], "is_key": true}, {"id": 10, "start": 65.79, "end": 71.39, "text": "為什麼這麼自信？因為黑方有三條反擊線！", "raw": "為什麼這麼自信 因為黑方有三一條", "moves": [], "is_key": true}, {"id": 11, "start": 71.39, "end": 80.22, "text": "第一條，第二條，第三條！", "raw": "第一條 第二條 第三條", "moves": [], "is_key": false}, {"id": 12, "start": 80.22, "end": 84.3, "text": "所以說，象棋是體育項目", "raw": "所以說 相提是體育項目", "moves": [], "is_key": false}, {"id": 13, "start": 84.3, "end": 90.62, "text": "下面紅方絕對不能來將軍出帥", "raw": "下面紅方絕對不能來將軍處於", "moves": [], "is_key": false}, {"id": 14, "start": 90.62, "end": 94.94, "text": "如果人家不相信，非要進來", "raw": "如果人家不相信 進入來", "moves": [], "is_key": false}, {"id": 15, "start": 94.94, "end": 99.26, "text": "你就直接抽掉這個炮", "raw": "你就直接拆掉這個泡", "moves": [], "is_key": false}, {"id": 16, "start": 99.26, "end": 105.58, "text": "讓他過過癮吧！你進馬一將，只能進帥！", "raw": "那他過過引吧 你進馬一槍 只能進帥", "moves": ["進馬一將", "帥五進一"], "is_key": true}, {"id": 17, "start": 105.58, "end": 110.78, "text": "下面是進炮殺呢，還是進車殺呢？", "raw": "下面是進泡沙呢 還是進居沙呢", "moves": [], "is_key": false}, {"id": 18, "start": 110.78, "end": 116.42, "text": "那你就看心情吧！", "raw": "那你就看心情吧", "moves": [], "is_key": false}, {"id": 19, "start": 116.42, "end": 122.02, "text": "咱們一回到節點，把這個地方……紅方肯定想出車", "raw": "咱們一回到節點 把這個地方 紅方肯定想出居", "moves": ["車一平二"], "is_key": true}, {"id": 20, "start": 122.02, "end": 124.34, "text": "來配合空頭炮", "raw": "來配合空頭號", "moves": [], "is_key": false}, {"id": 21, "start": 124.34, "end": 128.26, "text": "不然空頭炮就是紙老虎！", "raw": "不然空頭號就是只老虎", "moves": [], "is_key": true}, {"id": 22, "start": 128.26, "end": 134.42, "text": "他如果平車，你就進馬", "raw": "他如果平居 你就進馬", "moves": ["馬２進３"], "is_key": true}, {"id": 23, "start": 134.42, "end": 137.22, "text": "他肯定不能殺炮", "raw": "他肯定不能殺泡", "moves": [], "is_key": false}, {"id": 24, "start": 137.22, "end": 141.5, "text": "因為你退馬一將、進車殺棋！", "raw": "因為你退馬一槍進居沙旗", "moves": ["退馬一將", "進車殺棋"], "is_key": true}, {"id": 25, "start": 141.5, "end": 145.9, "text": "那這是又要殺還要賠著車，只能是高一步車", "raw": "那這是要沙還陪著居 只能是高一不居", "moves": ["高一步車"], "is_key": false}, {"id": 26, "start": 145.9, "end": 148.62, "text": "然後退馬一將", "raw": "然後退馬一槍", "moves": ["退馬一將"], "is_key": true}, {"id": 27, "start": 148.62, "end": 151.42, "text": "肯定不能走帥", "raw": "肯定不能走帥", "moves": [], "is_key": false}, {"id": 28, "start": 151.42, "end": 159.23, "text": "因為你進車點刺就是殺棋！", "raw": "因為你打居居居居居居就是它旗", "moves": ["進車殺棋"], "is_key": true}, {"id": 29, "start": 159.23, "end": 162.43, "text": "所以只能是平車然後……", "raw": "所以這能是平居人戶", "moves": ["平車吃炮"], "is_key": false}, {"id": 30, "start": 162.43, "end": 172.69, "text": "把這個炮給吃了，被平炮打相！", "raw": "把這個泡給泡了 被平泡打性", "moves": ["平炮打相"], "is_key": true}, {"id": 31, "start": 172.69, "end": 174.21, "text": "進炮一將！", "raw": "進泡一槍", "moves": ["進炮一將"], "is_key": true}, {"id": 32, "start": 174.21, "end": 180.06, "text": "到了這步棋，大家都沒有任何問題", "raw": "到來這個旗 大家都沒有任何問題", "moves": [], "is_key": false}, {"id": 33, "start": 180.06, "end": 184.7, "text": "但是棋譜可能更加的精準", "raw": "但是旗普可能更加的精準", "moves": [], "is_key": false}, {"id": 34, "start": 184.7, "end": 187.02, "text": "所以就看完", "raw": "所以就看完", "moves": [], "is_key": false}, {"id": 35, "start": 187.02, "end": 190.06, "text": "進車一將！", "raw": "進居一槍", "moves": ["進車一將"], "is_key": true}, {"id": 36, "start": 190.06, "end": 195.54, "text": "被退車一將！", "raw": "被退居一槍", "moves": ["退車一將"], "is_key": true}, {"id": 37, "start": 195.54, "end": 200.82, "text": "然後紅方走什麼，一點都不重要", "raw": "然後紅方走什麼 一點都不重要", "moves": [], "is_key": false}, {"id": 38, "start": 200.82, "end": 204.9, "text": "因為黑方都是直接開殺", "raw": "因為黑方都是直接凱視", "moves": ["鐵門栓"], "is_key": true}, {"id": 39, "start": 204.9, "end": 218.82, "text": "紅方是只能進帥，然後就沒有了（直接被殺）", "raw": "紅方是只能進帥 雖然後就沒有了", "moves": ["只能進帥"], "is_key": true}, {"id": 40, "start": 218.82, "end": 221.14, "text": "咱們再回到節點", "raw": "咱們再回到節點", "moves": ["重演節點"], "is_key": true}, {"id": 41, "start": 221.14, "end": 225.06, "text": "所以這個地方紅方只能起橫車", "raw": "所以這個地方紅方只能起航居", "moves": ["車一進一"], "is_key": true}, {"id": 42, "start": 225.06, "end": 228.1, "text": "而且只能是這一個", "raw": "而且只能是這一個", "moves": [], "is_key": false}, {"id": 43, "start": 228.1, "end": 229.54, "text": "為什麼呢？", "raw": "為什麼呢", "moves": [], "is_key": false}, {"id": 44, "start": 229.54, "end": 233.3, "text": "因為如果起這個車，你讓它出來", "raw": "因為如果起這個居 你讓它出來", "moves": [], "is_key": false}, {"id": 45, "start": 233.3, "end": 235.3, "text": "它都不出來", "raw": "它都不出來", "moves": [], "is_key": false}, {"id": 46, "start": 235.3, "end": 238.1, "text": "紅方的攻勢在中路", "raw": "紅方的公式在中路", "moves": [], "is_key": false}, {"id": 47, "start": 238.1, "end": 240.82, "text": "黑方的攻勢就在這邊", "raw": "黑方的公式就在這邊", "moves": [], "is_key": false}, {"id": 48, "start": 240.82, "end": 242.82, "text": "四子歸邊！", "raw": "四子溢邊", "moves": ["四子歸邊"], "is_key": true}, {"id": 49, "start": 242.82, "end": 249.66, "text": "這個車如果走了就是空門無子防守", "raw": "這個居如果走了就是空門無子防守", "moves": [], "is_key": false}, {"id": 50, "start": 249.66, "end": 252.62, "text": "所以肯定是起這個車", "raw": "所以肯定是起這個居", "moves": ["起橫車"], "is_key": false}, {"id": 51, "start": 252.62, "end": 257.1, "text": "它起了橫車以後，守住象線", "raw": "它起了橫居一戶 守住向線", "moves": ["守住象線"], "is_key": true}, {"id": 52, "start": 257.1, "end": 260.86, "text": "就有平炮抽車的手段", "raw": "就有平耗抽居的手段", "moves": ["平炮抽車"], "is_key": true}, {"id": 53, "start": 260.86, "end": 264.78, "text": "那個時候你再殺炮就不成立了", "raw": "那個時候你再殺泡就不成立了", "moves": [], "is_key": false}, {"id": 54, "start": 264.78, "end": 268.54, "text": "所以一定要把車調出來", "raw": "所以一定要把居掉出來", "moves": [], "is_key": false}, {"id": 55, "start": 268.54, "end": 271.5, "text": "調出來以後就不怕抽了", "raw": "掉出來一戶就不怕抽了", "moves": [], "is_key": false}, {"id": 56, "start": 271.5, "end": 277.25, "text": "因為這個還是防著", "raw": "因為這個還是反著", "moves": [], "is_key": false}, {"id": 57, "start": 277.25, "end": 280.13, "text": "黑方的炮要沉下去", "raw": "黑方的泡要痛下去", "moves": ["沉底炮"], "is_key": false}, {"id": 58, "start": 280.13, "end": 285.89, "text": "紅方平車攔炮是必然的走法", "raw": "紅方平居藍泡是必然的走法", "moves": ["車一平八"], "is_key": true}, {"id": 59, "start": 285.89, "end": 291.65, "text": "下面進炮就要打相出帥", "raw": "下面進泡就要打槍出這個無給你", "moves": ["打相出帥"], "is_key": false}, {"id": 60, "start": 291.65, "end": 295.41, "text": "進炮沒有用，只能是進士", "raw": "今晚沒有用只能使進士", "moves": ["士四進五"], "is_key": false}, {"id": 61, "start": 295.41, "end": 300.22, "text": "然後平炮", "raw": "然後平泡", "moves": ["平炮"], "is_key": false}, {"id": 62, "start": 300.22, "end": 304.22, "text": "平炮以後有一手大家一定要知道", "raw": "平泡以後有個手大家一定要知道", "moves": [], "is_key": true}, {"id": 63, "start": 304.22, "end": 307.42, "text": "就是進馬！隨便跳", "raw": "就是上馬隨便上", "moves": ["進馬牽車"], "is_key": true}, {"id": 64, "start": 307.42, "end": 311.42, "text": "一旦進馬這個車就丟了", "raw": "一旦上馬這個居就丟了", "moves": [], "is_key": false}, {"id": 65, "start": 311.42, "end": 313.9, "text": "因為有打門（反將抽車）", "raw": "因為有打門", "moves": ["打門抽車"], "is_key": true}, {"id": 66, "start": 313.9, "end": 318.3, "text": "所以在這個時候紅方要提前", "raw": "所以在這個時候紅方要提前", "moves": [], "is_key": false}, {"id": 67, "start": 318.3, "end": 321.18, "text": "把帥平出來", "raw": "把帥平出來", "moves": ["帥五平四"], "is_key": true}, {"id": 68, "start": 321.18, "end": 325.34, "text": "然後你進馬牽車", "raw": "然後你進馬拳居", "moves": ["進馬牽車"], "is_key": true}, {"id": 69, "start": 325.34, "end": 330.38, "text": "這時紅方真是刁了", "raw": "這次紅方真是掉了", "moves": [], "is_key": false}, {"id": 70, "start": 330.38, "end": 335.26, "text": "因為他平炮將軍帶抽", "raw": "因為它平泡將軍代謝了", "moves": ["平炮將軍"], "is_key": true}, {"id": 71, "start": 335.26, "end": 337.5, "text": "你要應將了", "raw": "你要硬將了", "moves": ["應將"], "is_key": false}, {"id": 72, "start": 337.5, "end": 340.54, "text": "然後白白看著丟一個炮", "raw": "然後白白看就有一個泡", "moves": [], "is_key": false}, {"id": 73, "start": 340.54, "end": 342.14, "text": "對吧？", "raw": "對吧", "moves": [], "is_key": false}, {"id": 74, "start": 342.14, "end": 345.5, "text": "因為你未打相", "raw": "因為你費打槍", "moves": [], "is_key": false}, {"id": 75, "start": 345.5, "end": 347.34, "text": "老帥出來了", "raw": "雲老帥出來了", "moves": ["老帥出宮"], "is_key": false}, {"id": 76, "start": 347.34, "end": 354.74, "text": "沒有殺，而且他還要再平炮", "raw": "沒有啥而且它還要再平泡", "moves": [], "is_key": false}, {"id": 77, "start": 354.74, "end": 356.74, "text": "抽你的車", "raw": "出你的局", "moves": ["平炮抽車"], "is_key": false}, {"id": 78, "start": 356.74, "end": 364.1, "text": "你還要迴避一手。下面紅方……", "raw": "你還要費必一手下面紅方", "moves": [], "is_key": false}, {"id": 79, "start": 364.1, "end": 367.7, "text": "進車這是必然走法！", "raw": "進居這是必然走法", "moves": ["進車點住"], "is_key": true}, {"id": 80, "start": 367.7, "end": 372.18, "text": "就是說如果你來將", "raw": "就是說如果你來將如果", "moves": [], "is_key": false}, {"id": 81, "start": 372.18, "end": 374.02, "text": "他就要對車", "raw": "它就要對隔", "moves": ["對車"], "is_key": false}, {"id": 82, "start": 374.02, "end": 375.38, "text": "如果不對", "raw": "如果不對", "moves": [], "is_key": false}, {"id": 83, "start": 375.38, "end": 378.1, "text": "再平車", "raw": "在平居", "moves": ["平車"], "is_key": false}, {"id": 84, "start": 378.1, "end": 380.5, "text": "他就進車點住", "raw": "它就進居點住", "moves": ["進車點住"], "is_key": true}, {"id": 85, "start": 380.5, "end": 391.39, "text": "有了打相、平車等等強大的反攻！", "raw": "有了打槍平居等等強大的反攻", "moves": ["打相", "反攻"], "is_key": true}, {"id": 86, "start": 391.39, "end": 393.23, "text": "所以在這個時候", "raw": "所以在這個時候", "moves": [], "is_key": false}, {"id": 87, "start": 393.23, "end": 395.87, "text": "黑方是平車", "raw": "黑方是平居", "moves": ["平車"], "is_key": false}, {"id": 88, "start": 395.87, "end": 400.03, "text": "來捉馬同時分車", "raw": "來抓馬同時分居", "moves": ["捉馬分車"], "is_key": true}, {"id": 89, "start": 400.03, "end": 402.91, "text": "因為只要紅方的車不敢平", "raw": "因為這要紅方的居不敢平", "moves": [], "is_key": false}, {"id": 90, "start": 402.91, "end": 409.49, "text": "你直接就殺棋了！", "raw": "你直接就殺其了", "moves": ["直接殺棋"], "is_key": true}, {"id": 91, "start": 409.49, "end": 413.25, "text": "那捉這隻馬，平車又要死棋", "raw": "那抓這麼馬平的要死亡", "moves": [], "is_key": false}, {"id": 92, "start": 413.25, "end": 416.77, "text": "然後退炮", "raw": "然後退泡", "moves": ["退炮"], "is_key": false}, {"id": 93, "start": 416.77, "end": 419.89, "text": "紅方一看乖乖", "raw": "紅方一看乖乖", "moves": [], "is_key": false}, {"id": 94, "start": 419.89, "end": 422.13, "text": "我退車先捉雙！你能怎麼辦？", "raw": "我退居先住雙", "moves": ["退車捉雙"], "is_key": true}, {"id": 95, "start": 422.13, "end": 423.89, "text": "你能怎麼辦？", "raw": "你能怎麼辦", "moves": [], "is_key": false}, {"id": 96, "start": 423.89, "end": 426.99, "text": "如果這樣走", "raw": "如果這樣走", "moves": [], "is_key": false}, {"id": 97, "start": 426.99, "end": 429.87, "text": "平車將只能平炮", "raw": "平居將只能平泡", "moves": ["平車將"], "is_key": true}, {"id": 98, "start": 429.87, "end": 432.91, "text": "退馬一將是雙將！", "raw": "退馬一將是雙將", "moves": ["退馬雙將"], "is_key": true}, {"id": 99, "start": 432.91, "end": 434.27, "text": "只能退帥", "raw": "只能退帥", "moves": ["退帥"], "is_key": false}, {"id": 100, "start": 434.27, "end": 447.62, "text": "然後殺棋！", "raw": "然後殺其", "moves": ["殺棋"], "is_key": true}, {"id": 101, "start": 447.62, "end": 448.9, "text": "好，再回到節點", "raw": "好再回來", "moves": ["重回節點"], "is_key": true}, {"id": 102, "start": 448.9, "end": 451.62, "text": "所以紅方一想這不對", "raw": "所以紅方一怎麼不對", "moves": [], "is_key": false}, {"id": 103, "start": 451.62, "end": 454.9, "text": "我應該是退到底線", "raw": "我應該是退到底線", "moves": ["車退底線"], "is_key": true}, {"id": 104, "start": 454.9, "end": 456.18, "text": "不能讓你殺", "raw": "不能讓你沒", "moves": [], "is_key": false}, {"id": 105, "start": 456.18, "end": 460.13, "text": "對不對？", "raw": "對不對", "moves": [], "is_key": false}, {"id": 106, "start": 460.13, "end": 465.17, "text": "下面就是威震江湖的「平車問路」！", "raw": "下面就是威政江湖的平居溫路", "moves": ["平車問路"], "is_key": true}, {"id": 107, "start": 465.17, "end": 468.61, "text": "也可以叫「停車問路」", "raw": "也可能要停車溫路", "moves": ["停車問路"], "is_key": true}, {"id": 108, "start": 468.61, "end": 471.65, "text": "就是一隻車", "raw": "就是一個居", "moves": [], "is_key": false}, {"id": 109, "start": 471.65, "end": 473.33, "text": "他就直進了一步", "raw": "他直陸了一步", "moves": ["進車一步"], "is_key": false}, {"id": 110, "start": 473.33, "end": 475.25, "text": "然後停下來", "raw": "人後停下來", "moves": [], "is_key": false}, {"id": 111, "start": 475.25, "end": 476.29, "text": "問路！", "raw": "溫路", "moves": ["問路"], "is_key": true}, {"id": 112, "start": 476.29, "end": 478.29, "text": "問好路再出手", "raw": "溫好路再出手", "moves": [], "is_key": false}, {"id": 113, "start": 478.29, "end": 480.61, "text": "一出手就結束！", "raw": "一出手就結束", "moves": [], "is_key": true}, {"id": 114, "start": 480.61, "end": 483.41, "text": "下面怎麼走？", "raw": "下面怎麼走", "moves": [], "is_key": false}, {"id": 115, "start": 483.41, "end": 486.93, "text": "直接砍掉！", "raw": "直接看掉", "moves": ["砍子"], "is_key": true}, {"id": 116, "start": 486.93, "end": 489.33, "text": "紅方肯定不能殺", "raw": "紅方肯定不能殺", "moves": [], "is_key": false}, {"id": 117, "start": 489.33, "end": 492.29, "text": "砍掉了退馬進炮", "raw": "剛掉了退馬進泡", "moves": ["退馬進炮"], "is_key": true}, {"id": 118, "start": 492.29, "end": 493.73, "text": "他只能平台（平帥）", "raw": "他只能平台", "moves": ["平帥"], "is_key": false}, {"id": 119, "start": 493.73, "end": 503.36, "text": "然後紅方只能進仕防守", "raw": "人後的紅方只能進示範", "moves": ["進仕"], "is_key": false}, {"id": 120, "start": 503.36, "end": 505.04, "text": "車在高位", "raw": "居在高位", "moves": ["高位車"], "is_key": false}, {"id": 121, "start": 505.04, "end": 507.84, "text": "就是好事！", "raw": "就是豪室", "moves": [], "is_key": false}, {"id": 122, "start": 507.84, "end": 510.66, "text": "再回馬", "raw": "在回馬", "moves": ["回馬"], "is_key": false}, {"id": 123, "start": 510.66, "end": 513.06, "text": "再然後呢？", "raw": "在然後呢", "moves": [], "is_key": false}, {"id": 124, "start": 513.06, "end": 515.06, "text": "絕殺，拜拜！", "raw": "拜拜", "moves": ["絕殺"], "is_key": true}];
+    const MILESTONES = [{"step": 1, "time_sec": 4.0, "notation": "開局初始盤面", "desc": "雙方 32 顆棋子就位，紅先黑後。", "piece_count": 32, "pieces": [{"r": 0, "c": 0, "side": "red", "name": "車"}, {"r": 0, "c": 1, "side": "red", "name": "馬"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 1, "side": "red", "name": "炮"}, {"r": 2, "c": 7, "side": "red", "name": "炮"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 2, "side": "red", "name": "兵"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 1, "side": "black", "name": "馬"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 9, "c": 7, "side": "black", "name": "馬"}, {"r": 9, "c": 8, "side": "black", "name": "車"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 2, "side": "black", "name": "卒"}, {"r": 6, "c": 4, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}]}, {"step": 2, "time_sec": 20.0, "notation": "仙人指路（兵七進一）對 馬８進７", "desc": "紅方挺七路兵至河界(4,2)，黑方起卒底馬應對。", "piece_count": 32, "pieces": [{"r": 0, "c": 0, "side": "red", "name": "車"}, {"r": 0, "c": 1, "side": "red", "name": "馬"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 1, "side": "red", "name": "炮"}, {"r": 2, "c": 7, "side": "red", "name": "炮"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 4, "c": 2, "side": "red", "name": "兵"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 1, "side": "black", "name": "馬"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 7, "c": 6, "side": "black", "name": "馬"}, {"r": 9, "c": 8, "side": "black", "name": "車"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 2, "side": "black", "name": "卒"}, {"r": 6, "c": 4, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}]}, {"step": 3, "time_sec": 31.6, "notation": "架中炮起正馬 (七星劍體系)", "desc": "紅方架中炮起正馬，黑方挺卒對攻、車１進１起高車。紅兵在河界(4,2)。", "piece_count": 32, "pieces": [{"r": 0, "c": 0, "side": "red", "name": "車"}, {"r": 2, "c": 2, "side": "red", "name": "馬"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 1, "side": "red", "name": "炮"}, {"r": 2, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 4, "c": 2, "side": "red", "name": "兵"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 1, "side": "black", "name": "馬"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 7, "c": 6, "side": "black", "name": "馬"}, {"r": 8, "c": 8, "side": "black", "name": "車"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 5, "c": 2, "side": "black", "name": "卒"}, {"r": 6, "c": 4, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}]}, {"step": 4, "time_sec": 40.9, "notation": "黑方巡河車捉馬 (車１平７)", "desc": "「因為你殺著馬，他也不可能進兵讓你殺掉在捉馬。」黑車巡河捉馬(8,8 -> 8,2)，紅兵在河界(4,2)未過河，黑中卒在位(6,4)。", "piece_count": 31, "pieces": [{"r": 0, "c": 0, "side": "red", "name": "車"}, {"r": 2, "c": 2, "side": "red", "name": "馬"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 1, "side": "red", "name": "炮"}, {"r": 2, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 4, "c": 2, "side": "red", "name": "兵"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 1, "side": "black", "name": "馬"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 7, "c": 6, "side": "black", "name": "馬"}, {"r": 8, "c": 2, "side": "black", "name": "車"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 4, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}]}, {"step": 5, "time_sec": 46.5, "notation": "紅方馬三進四（盤頭馬起跳）", "desc": "「所以只能是……」紅方右馬躍起跳盤頭(2,2 -> 4,3)，黑中卒牢牢守在(6,4)，局勢蓄勢待發。", "piece_count": 31, "pieces": [{"r": 0, "c": 0, "side": "red", "name": "車"}, {"r": 4, "c": 3, "side": "red", "name": "馬"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 1, "side": "red", "name": "炮"}, {"r": 2, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 4, "c": 2, "side": "red", "name": "兵"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 1, "side": "black", "name": "馬"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 7, "c": 6, "side": "black", "name": "馬"}, {"r": 8, "c": 2, "side": "black", "name": "車"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 4, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}]}, {"step": 6, "time_sec": 51.5, "notation": "黑車進河界吃兵 (車７進３)", "desc": "黑車從(8,2)進至河界(5,2)吃掉紅兵，牽制紅方右翼。", "piece_count": 30, "pieces": [{"r": 0, "c": 0, "side": "red", "name": "車"}, {"r": 4, "c": 3, "side": "red", "name": "馬"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 1, "side": "red", "name": "炮"}, {"r": 2, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 1, "side": "black", "name": "馬"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 7, "c": 6, "side": "black", "name": "馬"}, {"r": 5, "c": 2, "side": "black", "name": "車"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 4, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}]}, {"step": 7, "time_sec": 55.0, "notation": "紅方馬四進五吃中卒 (中路強攻)", "desc": "「但是這個時候紅方可能都笑了！」紅盤頭馬強行踩入中路(4,3 -> 6,4)吃掉黑中卒。", "piece_count": 29, "pieces": [{"r": 0, "c": 0, "side": "red", "name": "車"}, {"r": 6, "c": 4, "side": "red", "name": "馬"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 1, "side": "red", "name": "炮"}, {"r": 2, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 1, "side": "black", "name": "馬"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 7, "c": 6, "side": "black", "name": "馬"}, {"r": 5, "c": 2, "side": "black", "name": "車"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}]}, {"step": 8, "time_sec": 58.0, "notation": "黑方馬７進５吃馬 (拆中卒引誘打空頭)", "desc": "「我直接就拆中卒，然後打空頭！」黑方卒底馬(7,6 -> 6,4)反吃紅馬，故意給紅方架空頭炮！", "piece_count": 28, "pieces": [{"r": 0, "c": 0, "side": "red", "name": "車"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 1, "side": "red", "name": "炮"}, {"r": 2, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 1, "side": "black", "name": "馬"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 6, "c": 4, "side": "black", "name": "馬"}, {"r": 5, "c": 2, "side": "black", "name": "車"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}]}, {"step": 9, "time_sec": 71.4, "notation": "紅方炮五進四架空頭炮 (黑方展開三條反擊線)", "desc": "「空頭炮不可怕！為什麼這麼自信？因為黑方有三條反擊線！」紅炮(2,4 -> 6,4)打馬架空頭炮，黑馬(9,1 -> 7,2)躍出反撲。", "piece_count": 27, "pieces": [{"r": 0, "c": 0, "side": "red", "name": "車"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 1, "side": "red", "name": "炮"}, {"r": 6, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 7, "c": 2, "side": "black", "name": "馬"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 5, "c": 2, "side": "black", "name": "車"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}]}, {"step": 10, "time_sec": 99.3, "notation": "進馬一將 只能進帥", "desc": "「那他過過癮吧，你進馬一將，只能進帥！」", "piece_count": 24, "pieces": [{"r": 0, "c": 0, "side": "red", "name": "車"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 1, "side": "red", "name": "炮"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 4, "c": 0, "side": "red", "name": "炮"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 1, "c": 4, "side": "black", "name": "馬"}, {"r": 5, "c": 2, "side": "black", "name": "車"}]}, {"step": 11, "time_sec": 105.6, "notation": "進炮殺還是進車殺", "desc": "「下面是進炮殺呢，還是進車殺呢？那你就看心情吧！」", "piece_count": 24, "pieces": [{"r": 0, "c": 0, "side": "red", "name": "車"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 1, "c": 4, "side": "red", "name": "帥"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 9, "c": 0, "side": "black", "name": "炮"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}, {"r": 5, "c": 2, "side": "black", "name": "車"}, {"r": 1, "c": 6, "side": "black", "name": "馬"}]}, {"step": 12, "time_sec": 116.4, "notation": "回到節點：紅方想出車", "desc": "「咱們一回到節點，紅方肯定想出車來配合空頭炮。」", "piece_count": 27, "pieces": [{"r": 0, "c": 0, "side": "red", "name": "車"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 4, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}, {"r": 5, "c": 2, "side": "black", "name": "車"}, {"r": 3, "c": 2, "side": "black", "name": "馬"}]}, {"step": 13, "time_sec": 128.3, "notation": "他若平車 你就進馬", "desc": "「他如果平車，你就進馬，他肯定不能殺炮！」", "piece_count": 27, "pieces": [{"r": 1, "c": 1, "side": "red", "name": "車"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 4, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}, {"r": 5, "c": 2, "side": "black", "name": "車"}, {"r": 1, "c": 3, "side": "black", "name": "馬"}]}, {"step": 14, "time_sec": 141.5, "notation": "退馬一將 高一步車", "desc": "「那是又要殺還要陪著車，只能是高一步車，然後退馬一將。」", "piece_count": 26, "pieces": [{"r": 1, "c": 1, "side": "red", "name": "車"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 4, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}, {"r": 5, "c": 2, "side": "black", "name": "車"}]}, {"step": 15, "time_sec": 159.2, "notation": "平炮打相 伏下絕殺", "desc": "「所以只能是平車，把這個炮給吃了，被平炮打相！」", "piece_count": 25, "pieces": [{"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 4, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 0, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}, {"r": 5, "c": 2, "side": "black", "name": "車"}]}, {"step": 16, "time_sec": 172.7, "notation": "進炮一將 步步緊逼", "desc": "「進炮一將，到這個棋大家都沒有任何問題。」", "piece_count": 25, "pieces": [{"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 4, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 0, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}, {"r": 5, "c": 2, "side": "black", "name": "車"}]}, {"step": 17, "time_sec": 187.0, "notation": "進車一將 鐵門栓", "desc": "「進車一將！被退車一將！」", "piece_count": 25, "pieces": [{"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 1, "c": 4, "side": "red", "name": "仕"}, {"r": 2, "c": 4, "side": "red", "name": "相"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 4, "c": 4, "side": "red", "name": "炮"}, {"r": 1, "c": 5, "side": "red", "name": "車"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 0, "c": 1, "side": "black", "name": "炮"}, {"r": 5, "c": 2, "side": "black", "name": "車"}, {"r": 7, "c": 2, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}]}, {"step": 18, "time_sec": 204.9, "notation": "紅方只能進帥 反抽紅車", "desc": "「紅方是只能進帥，雖然然後就沒有了（直接被殺）。」", "piece_count": 24, "pieces": [{"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 2, "c": 4, "side": "red", "name": "相"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 4, "c": 4, "side": "red", "name": "炮"}, {"r": 1, "c": 5, "side": "red", "name": "車"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 0, "c": 1, "side": "black", "name": "炮"}, {"r": 1, "c": 4, "side": "black", "name": "車"}, {"r": 7, "c": 2, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}]}, {"step": 19, "time_sec": 221.1, "notation": "節點重演：紅方起橫車", "desc": "「咱們再回到節點，所以這個地方紅方只能起橫車守住象線。」", "piece_count": 27, "pieces": [{"r": 0, "c": 0, "side": "red", "name": "車"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 0, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 4, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}, {"r": 5, "c": 2, "side": "black", "name": "車"}, {"r": 3, "c": 2, "side": "black", "name": "馬"}]}, {"step": 20, "time_sec": 257.1, "notation": "起橫車後 平炮抽車", "desc": "「它起了橫車守住象線，就有平炮抽車的手段。」", "piece_count": 27, "pieces": [{"r": 0, "c": 0, "side": "red", "name": "車"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 1, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 4, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}, {"r": 5, "c": 2, "side": "black", "name": "車"}, {"r": 3, "c": 2, "side": "black", "name": "馬"}]}, {"step": 21, "time_sec": 280.1, "notation": "紅方平車攔炮", "desc": "「紅方平車攔炮是必然的走法。」", "piece_count": 27, "pieces": [{"r": 0, "c": 0, "side": "red", "name": "車"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 1, "c": 2, "side": "red", "name": "車"}, {"r": 2, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 4, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}, {"r": 5, "c": 2, "side": "black", "name": "車"}, {"r": 3, "c": 2, "side": "black", "name": "馬"}]}, {"step": 22, "time_sec": 321.2, "notation": "進馬牽車 強制兌子", "desc": "「然後你進馬牽車，平炮將軍。」", "piece_count": 26, "pieces": [{"r": 0, "c": 0, "side": "red", "name": "車"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 1, "c": 2, "side": "red", "name": "車"}, {"r": 2, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}, {"r": 5, "c": 2, "side": "black", "name": "車"}, {"r": 4, "c": 4, "side": "black", "name": "馬"}]}, {"step": 23, "time_sec": 380.5, "notation": "進車點住 展開反攻", "desc": "「有了打相、平車等等強大的反攻！」", "piece_count": 26, "pieces": [{"r": 0, "c": 0, "side": "red", "name": "車"}, {"r": 0, "c": 2, "side": "red", "name": "相"}, {"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 4, "side": "red", "name": "帥"}, {"r": 0, "c": 5, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 0, "c": 7, "side": "red", "name": "馬"}, {"r": 1, "c": 2, "side": "red", "name": "車"}, {"r": 2, "c": 4, "side": "red", "name": "炮"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 6, "side": "red", "name": "兵"}, {"r": 3, "c": 8, "side": "red", "name": "兵"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 2, "side": "black", "name": "象"}, {"r": 9, "c": 3, "side": "black", "name": "士"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}, {"r": 7, "c": 1, "side": "black", "name": "炮"}, {"r": 7, "c": 7, "side": "black", "name": "炮"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 6, "c": 6, "side": "black", "name": "卒"}, {"r": 6, "c": 8, "side": "black", "name": "卒"}, {"r": 2, "c": 2, "side": "black", "name": "車"}, {"r": 4, "c": 4, "side": "black", "name": "馬"}]}, {"step": 24, "time_sec": 429.9, "notation": "退車捉雙 退馬雙將", "desc": "「我退車先捉雙！退馬一將是雙將，只能退帥！」", "piece_count": 23, "pieces": [{"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 1, "c": 1, "side": "red", "name": "車"}, {"r": 1, "c": 4, "side": "red", "name": "仕"}, {"r": 1, "c": 5, "side": "red", "name": "帥"}, {"r": 1, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 6, "side": "red", "name": "馬"}, {"r": 2, "c": 8, "side": "red", "name": "兵"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 4, "c": 1, "side": "red", "name": "炮"}, {"r": 1, "c": 2, "side": "black", "name": "炮"}, {"r": 1, "c": 3, "side": "black", "name": "馬"}, {"r": 4, "c": 5, "side": "black", "name": "車"}, {"r": 5, "c": 6, "side": "black", "name": "卒"}, {"r": 5, "c": 8, "side": "black", "name": "卒"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 7, "c": 4, "side": "black", "name": "象"}, {"r": 8, "c": 4, "side": "black", "name": "士"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}]}, {"step": 25, "time_sec": 460.1, "notation": "威震江湖：平車問路", "desc": "「下面就是威震江湖的平車問路！大局已定，黑勝！」", "piece_count": 23, "pieces": [{"r": 0, "c": 3, "side": "red", "name": "仕"}, {"r": 0, "c": 6, "side": "red", "name": "相"}, {"r": 1, "c": 1, "side": "red", "name": "車"}, {"r": 1, "c": 4, "side": "red", "name": "仕"}, {"r": 1, "c": 5, "side": "red", "name": "帥"}, {"r": 1, "c": 8, "side": "red", "name": "車"}, {"r": 2, "c": 6, "side": "red", "name": "馬"}, {"r": 2, "c": 8, "side": "red", "name": "兵"}, {"r": 3, "c": 0, "side": "red", "name": "兵"}, {"r": 3, "c": 4, "side": "red", "name": "兵"}, {"r": 4, "c": 1, "side": "red", "name": "炮"}, {"r": 1, "c": 2, "side": "black", "name": "炮"}, {"r": 1, "c": 3, "side": "black", "name": "馬"}, {"r": 3, "c": 5, "side": "black", "name": "車"}, {"r": 5, "c": 6, "side": "black", "name": "卒"}, {"r": 5, "c": 8, "side": "black", "name": "卒"}, {"r": 6, "c": 0, "side": "black", "name": "卒"}, {"r": 7, "c": 4, "side": "black", "name": "象"}, {"r": 8, "c": 4, "side": "black", "name": "士"}, {"r": 9, "c": 0, "side": "black", "name": "車"}, {"r": 9, "c": 4, "side": "black", "name": "將"}, {"r": 9, "c": 5, "side": "black", "name": "士"}, {"r": 9, "c": 6, "side": "black", "name": "象"}]}];
+    const TELEMETRY = {"video_title": "破仙人指路很簡單，不能光過癮、還要瀟灑！我就忍痛割愛告訴你了_720p.mp4", "resolution": "1280x720", "duration_sec": 514.8, "frames_extracted": 258, "vision_events": 177, "speech_moves_extracted": 42, "opening_name": "仙人指路對卒底馬 轉 破空頭炮陷阱", "opening_code": "ECCO: C01"};
+
+    let currentStep = 1;
+    const totalMilestones = MILESTONES.length;
+    let isUserSeeking = false;
+    let autoPlayTimer = null;
+    let autoPlaySpeed = 1.0;
+    let activeFilter = 'all';
+
+    // Subtitle modes: 'live' (3-sentence rolling) or 'all' (124-list)
+    let subtitleMode = 'live';
+    let currentLiveIdx = -1;
+    let isSubFadedOut = false;
+
+    const video = document.getElementById('videoPlayer');
+    const unmuteBtn = document.getElementById('unmuteBtn');
+    const autoPlayAudioCheckbox = document.getElementById('autoPlayAudio');
+    const toastOverlay = document.getElementById('toastOverlay');
+    const toastMsg = document.getElementById('toastMsg');
+    const fallbackOverlay = document.getElementById('videoFallback');
+
+    function formatTime(sec) {
+      const m = Math.floor(sec / 60);
+      const s = Math.floor(sec % 60);
+      return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    }
+
+    function showToast(msg, isError = false) {
+      toastMsg.textContent = msg;
+      toastOverlay.style.borderColor = isError ? 'rgba(239, 68, 68, 0.5)' : 'rgba(56, 189, 248, 0.5)';
+      toastOverlay.style.color = isError ? '#f87171' : '#38bdf8';
+      toastOverlay.style.display = 'flex';
+      clearTimeout(window.toastTimer);
+      window.toastTimer = setTimeout(() => {
+        toastOverlay.style.display = 'none';
+      }, 3000);
+    }
+
+    function hideToast() {
+      toastOverlay.style.display = 'none';
+    }
+
+    function toggleMute() {
+      if (video) {
+        video.muted = !video.muted;
+        updateVolumeUI();
+        if (!video.muted && video.paused) {
+          video.play();
+        }
+      }
+    }
+
+    function updateVolumeUI() {
+      if (!video) return;
+      if (video.muted || video.volume === 0) {
+        unmuteBtn.textContent = '🔇 已靜音 (點擊解鎖聲音)';
+        unmuteBtn.style.background = 'rgba(239, 68, 68, 0.2)';
+        unmuteBtn.style.borderColor = 'rgba(239, 68, 68, 0.5)';
+        unmuteBtn.style.color = '#ef4444';
+      } else {
+        unmuteBtn.textContent = '🔊 聲音已開啟';
+        unmuteBtn.style.background = 'rgba(16, 185, 129, 0.2)';
+        unmuteBtn.style.borderColor = 'rgba(16, 185, 129, 0.5)';
+        unmuteBtn.style.color = '#10b981';
+      }
+    }
+
+    function setSubtitleMode(mode) {
+      subtitleMode = mode;
+      document.getElementById('btnModeLive').classList.toggle('active', mode === 'live');
+      document.getElementById('btnModeAll').classList.toggle('active', mode === 'all');
+      
+      const liveStage = document.getElementById('liveSubStage');
+      const fullContainer = document.getElementById('fullSubContainer');
+      const title = document.getElementById('subHeaderTitle');
+
+      if (mode === 'live') {
+        liveStage.style.display = 'flex';
+        fullContainer.style.display = 'none';
+        title.textContent = '🎙️ 即時語音字幕（後三句向上滾動 · 講完即隱）';
+        updateLiveRollingSubtitles(video ? video.currentTime : 0);
+      } else {
+        liveStage.style.display = 'none';
+        fullContainer.style.display = 'flex';
+        title.textContent = '📜 全量講義檢索（124 條逐字對照）';
+        renderFullSubtitles();
+        highlightActiveInFullList(video ? video.currentTime : 0);
+      }
+    }
+
+    /* Live 3-Sentence Rolling Subtitles */
+    function updateLiveRollingSubtitles(currentTime) {
+      if (subtitleMode !== 'live') return;
+
+      const listEl = document.getElementById('liveSubList');
+      const restingEl = document.getElementById('liveSubResting');
+
+      // Check if current time is inside a sentence
+      let activeIdx = -1;
+      for (let i = 0; i < SUBTITLES.length; i++) {
+        if (currentTime >= SUBTITLES[i].start && currentTime <= SUBTITLES[i].end) {
+          activeIdx = i;
+          break;
+        }
+      }
+
+      if (activeIdx !== -1) {
+        // Actively speaking sentence activeIdx
+        isSubFadedOut = false;
+        restingEl.style.display = 'none';
+
+        if (activeIdx !== currentLiveIdx) {
+          currentLiveIdx = activeIdx;
+          renderRollingThree(activeIdx);
+        }
+      } else {
+        // Between sentences: find most recent spoken sentence
+        let lastIdx = -1;
+        for (let i = SUBTITLES.length - 1; i >= 0; i--) {
+          if (currentTime >= SUBTITLES[i].end) {
+            lastIdx = i;
+            break;
+          }
+        }
+
+        if (lastIdx !== -1) {
+          const elapsed = currentTime - SUBTITLES[lastIdx].end;
+          // 「講完即消失」：講完 0.85 秒後平滑淡出
+          if (elapsed > 0.85 && !isSubFadedOut) {
+            isSubFadedOut = true;
+            const rows = listEl.querySelectorAll('.live-sub-row');
+            rows.forEach(r => r.classList.add('fading-out'));
+            setTimeout(() => {
+              if (isSubFadedOut) {
+                listEl.innerHTML = '';
+                restingEl.style.display = 'flex';
+                document.getElementById('restingText').textContent = '🎙️ 著法語音講解結束 · 講完自動隱藏';
+              }
+            }, 450);
+          }
+        }
+      }
+    }
+
+    function renderRollingThree(activeIdx) {
+      const listEl = document.getElementById('liveSubList');
+      const restingEl = document.getElementById('liveSubResting');
+      restingEl.style.display = 'none';
+
+      // Keep only up to 3 sentences: activeIdx - 2, activeIdx - 1, activeIdx
+      const startIdx = Math.max(0, activeIdx - 2);
+      const visible = SUBTITLES.slice(startIdx, activeIdx + 1);
+
+      listEl.innerHTML = '';
+      visible.forEach((sub, offset) => {
+        const actualIdx = startIdx + offset;
+        const isCurrent = (actualIdx === activeIdx);
+        const isPast1 = (actualIdx === activeIdx - 1);
+        const isPast2 = (actualIdx === activeIdx - 2);
+
+        const row = document.createElement('div');
+        row.className = 'live-sub-row ' + (
+          isCurrent ? 'current-speaking' :
+          (isPast1 ? 'past-1' : 'past-2')
+        );
+
+        let movesHtml = '';
+        if (sub.moves && sub.moves.length > 0 && isCurrent) {
+          movesHtml = sub.moves.map(m => `<span class="move-pill">${m}</span>`).join(' ');
+        }
+
+        row.innerHTML = `
+          <span class="live-sub-time">${formatTime(sub.start)}</span>
+          <span class="live-sub-text">${sub.text}</span>
+          ${movesHtml}
+        `;
+        listEl.appendChild(row);
+      });
+    }
+
+    /* 「重置時才出現」：重置時回到第一句準備狀態 */
+    function resetLiveSubtitles() {
+      currentLiveIdx = -1;
+      isSubFadedOut = false;
+      const listEl = document.getElementById('liveSubList');
+      const restingEl = document.getElementById('liveSubResting');
+      restingEl.style.display = 'none';
+
+      const firstSub = SUBTITLES[0];
+      listEl.innerHTML = `
+        <div class="live-sub-row current-speaking" style="background: rgba(56, 189, 248, 0.12); border-left-color: #38bdf8; color: #38bdf8;">
+          <span class="live-sub-time">${formatTime(firstSub.start)}</span>
+          <span class="live-sub-text">【開局準備】${firstSub.text}</span>
+          <span class="move-pill" style="border-color: #38bdf8; color: #38bdf8;">重置就位</span>
+        </div>
+      `;
+    }
+
+    /* Full Transcript List (Tab 2) */
+    function renderFullSubtitles() {
+      const list = document.getElementById('subtitlesList');
+      list.innerHTML = '';
+
+      let filtered = SUBTITLES;
+      if (activeFilter === 'moves') {
+        filtered = SUBTITLES.filter(s => s.moves && s.moves.length > 0);
+      } else if (activeFilter === 'key') {
+        filtered = SUBTITLES.filter(s => s.is_key);
+      }
+
+      filtered.forEach(sub => {
+        const item = document.createElement('div');
+        item.className = 'subtitle-item';
+        item.id = 'sub_' + sub.id;
+        item.dataset.start = sub.start;
+        item.dataset.end = sub.end;
+
+        const timeStr = formatTime(sub.start);
+
+        let movesHtml = '';
+        if (sub.moves && sub.moves.length > 0) {
+          movesHtml = '<div class="sub-moves">' + sub.moves.map(m => `<span class="move-pill">${m}</span>`).join('') + '</div>';
+        }
+
+        item.innerHTML = `
+          <span class="sub-time">${timeStr}</span>
+          <div class="sub-content">
+            <div>${sub.text}</div>
+            ${movesHtml}
+          </div>
+        `;
+
+        item.onclick = () => {
+          jumpToTimestamp(sub.start);
+        };
+
+        list.appendChild(item);
+      });
+    }
+
+    function filterSubtitles(type) {
+      activeFilter = type;
+      document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
+      event.target.classList.add('active');
+      renderFullSubtitles();
+    }
+
+    function jumpToTimestamp(sec) {
+      if (video) {
+        isUserSeeking = true;
+        video.currentTime = sec;
+        video.muted = false;
+        video.volume = 1.0;
+        updateVolumeUI();
+        video.play();
+        setTimeout(() => { isUserSeeking = false; }, 350);
+      }
+      updateLiveRollingSubtitles(sec);
+      highlightActiveInFullList(sec);
+      syncBoardWithTime(sec);
+      showToast(`🎙️ 跳轉至解說語音：${formatTime(sec)}`);
+    }
+
+    function highlightActiveInFullList(currentTime) {
+      if (subtitleMode !== 'all') return;
+      const items = document.querySelectorAll('.subtitle-item');
+      let activeItem = null;
+      items.forEach(item => {
+        const start = parseFloat(item.dataset.start);
+        const end = parseFloat(item.dataset.end);
+        if (currentTime >= start && currentTime <= (end + 0.5)) {
+          item.classList.add('active');
+          activeItem = item;
+        } else {
+          item.classList.remove('active');
+        }
+      });
+
+      // Smoothly scroll only within the subtitles container, NEVER scrolling window or video
+      if (activeItem && activeItem.parentElement) {
+        const parent = activeItem.parentElement;
+        const itemTop = activeItem.offsetTop - parent.offsetTop;
+        parent.scrollTo({ top: itemTop - 40, behavior: 'smooth' });
+      }
+    }
+
+    /* Chessboard Mapping & Render */
+    function getPercentPos(r, c) {
+      const left = 4.17 + (c / 8.0) * 91.66;
+      const top = 3.7 + (r / 9.0) * 92.6;
+      return { left, top };
+    }
+
+    function renderBoardMilestone(stepIndex) {
+      const m = MILESTONES[stepIndex - 1];
+      if (!m) return;
+
+      const container = document.getElementById('piecesContainer');
+      container.innerHTML = '';
+
+      m.pieces.forEach((p) => {
+        const el = document.createElement('div');
+        el.className = `piece ${p.side}`;
+        el.textContent = p.name;
+        const pos = getPercentPos(p.r, p.c);
+        el.style.left = pos.left + '%';
+        el.style.top = pos.top + '%';
+        el.title = `${p.side === 'red' ? '紅' : '黑'} ${p.name} (${p.r},${p.c})`;
+        container.appendChild(el);
+      });
+
+      const stepBadge = document.getElementById('stepBadge');
+      const moveTitle = document.getElementById('moveTitle');
+      const moveComment = document.getElementById('moveComment');
+
+      stepBadge.textContent = `第 ${stepIndex} / ${totalMilestones} 節點`;
+      moveTitle.textContent = `${m.notation} (${m.piece_count} 顆棋子)`;
+      moveComment.textContent = m.desc;
+
+      document.getElementById('btnFirst').disabled = (stepIndex === 1);
+      document.getElementById('btnPrev').disabled = (stepIndex === 1);
+      document.getElementById('btnNext').disabled = (stepIndex === totalMilestones);
+      document.getElementById('btnLast').disabled = (stepIndex === totalMilestones);
+
+      document.querySelectorAll('#movesTbody tr').forEach((tr, idx) => {
+        tr.classList.toggle('current-step', idx === (stepIndex - 1));
+      });
+      if (typeof pfAnalyze === 'function') pfAnalyze(stepIndex);
+    }
+
+    function goToStep(s, userTriggered = true) {
+      currentStep = Math.max(1, Math.min(totalMilestones, s));
+      renderBoardMilestone(currentStep);
+
+      const m = MILESTONES[currentStep - 1];
+      if (!m) return;
+
+      const targetTimestamp = m.time_sec;
+
+      // 1. Precise Video Time Jump & Playback Trigger
+      if (video) {
+        isUserSeeking = true;
+        try {
+          video.currentTime = targetTimestamp;
+        } catch(e) {
+          console.warn('Error setting video currentTime:', e);
+        }
+
+        // 2. Unmute & Play with Sound when user clicked Next/Prev
+        if (userTriggered && autoPlayAudioCheckbox.checked) {
+          video.muted = false;
+          video.volume = 1.0;
+          updateVolumeUI();
+
+          const playPromise = video.play();
+          if (playPromise !== undefined) {
+            playPromise.then(() => {
+              document.getElementById('syncStatus').textContent = '🔊 語音影音同步播放中';
+              document.getElementById('syncStatus').style.color = '#38bdf8';
+              showToast(`🔊 已跳轉至 ${formatTime(targetTimestamp)}（第 ${currentStep} 節點：${m.notation}）並發聲解說`);
+            }).catch((err) => {
+              console.warn("Autoplay audio blocked by browser policy, attempting muted fallback:", err);
+              video.muted = true;
+              video.play().then(() => {
+                showToast(`⚠️ 瀏覽器阻止自動發聲，請點擊上方「🔇 已靜音」按鈕解鎖聲音`, true);
+              });
+            });
+          }
+        } else {
+          showToast(`⚡ 已跳轉至 ${formatTime(targetTimestamp)}（第 ${currentStep} 節點：${m.notation}）`);
+        }
+
+        setTimeout(() => { isUserSeeking = false; }, 350);
+      }
+
+      // 3. Highlight subtitles
+      updateLiveRollingSubtitles(targetTimestamp);
+      highlightActiveInFullList(targetTimestamp);
+    }
+
+    function nextStep() {
+      if (currentStep < totalMilestones) {
+        goToStep(currentStep + 1, true);
+      }
+    }
+
+    function prevStep() {
+      if (currentStep > 1) {
+        goToStep(currentStep - 1, true);
+      }
+    }
+
+    function resetBoard() {
+      stopAutoPlay();
+      goToStep(1, false);
+      if (video) {
+        video.currentTime = 0;
+        video.pause();
+      }
+      resetLiveSubtitles();
+      showToast('🔄 已重置盤面至開局初始狀態');
+    }
+
+    function toggleAutoPlay() {
+      const btn = document.getElementById('btnPlay');
+      if (autoPlayTimer) {
+        stopAutoPlay();
+      } else {
+        btn.textContent = '⏸ 暫停演練';
+        btn.classList.add('active');
+        if (video) {
+          video.muted = false;
+          video.volume = 1.0;
+          updateVolumeUI();
+          video.play();
+        }
+      }
+    }
+
+    function stopAutoPlay() {
+      const btn = document.getElementById('btnPlay');
+      btn.textContent = '▶ 自動演練';
+      btn.classList.remove('active');
+      if (video && !video.paused) {
+        video.pause();
+      }
+    }
+
+    function changeSpeed(val) {
+      autoPlaySpeed = parseFloat(val);
+      if (video) {
+        video.playbackRate = autoPlaySpeed;
+      }
+    }
+
+    function syncBoardWithTime(currentTime) {
+      if (isUserSeeking) return;
+
+      let matchStep = 1;
+      for (let i = 0; i < MILESTONES.length; i++) {
+        if (currentTime >= MILESTONES[i].time_sec) {
+          matchStep = i + 1;
+        } else {
+          break;
+        }
+      }
+      if (matchStep !== currentStep) {
+        currentStep = matchStep;
+        renderBoardMilestone(currentStep);
+      }
+    }
+
+    // Video Events
+    video.addEventListener('timeupdate', () => {
+      const cur = video.currentTime;
+      updateLiveRollingSubtitles(cur);
+      highlightActiveInFullList(cur);
+      syncBoardWithTime(cur);
+    });
+
+    video.addEventListener('play', () => {
+      document.getElementById('syncStatus').textContent = '🔊 語音影音同步播放中';
+      document.getElementById('syncStatus').style.color = '#38bdf8';
+      const btn = document.getElementById('btnPlay');
+      btn.textContent = '⏸ 暫停演練';
+      btn.classList.add('active');
+      updateVolumeUI();
+    });
+
+    video.addEventListener('pause', () => {
+      document.getElementById('syncStatus').textContent = '⏸ 影片已暫停';
+      document.getElementById('syncStatus').style.color = '#f59e0b';
+      const btn = document.getElementById('btnPlay');
+      btn.textContent = '▶ 自動演練';
+      btn.classList.remove('active');
+    });
+
+    video.addEventListener('volumechange', () => {
+      updateVolumeUI();
+    });
+
+    video.addEventListener('error', () => {
+      fallbackOverlay.classList.add('active');
+      document.getElementById('syncStatus').textContent = '⚠️ 離線推演模式';
+      document.getElementById('syncStatus').style.color = '#f59e0b';
+    });
+
+    video.addEventListener('canplay', () => {
+      fallbackOverlay.classList.remove('active');
+      document.getElementById('syncStatus').textContent = '🟢 雙向影音即時同步中';
+      document.getElementById('syncStatus').style.color = '#10b981';
+      updateVolumeUI();
+    });
+
+    document.getElementById('videoFilePicker').addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) {
+        video.src = URL.createObjectURL(file);
+        video.muted = false;
+        video.volume = 1.0;
+        video.play();
+        fallbackOverlay.classList.remove('active');
+      }
+    });
+
+    function switchTab(tabId, btn) {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById(tabId).classList.add('active');
+    }
+
+    function renderMovesTable() {
+      const tbody = document.getElementById('movesTbody');
+      tbody.innerHTML = '';
+      MILESTONES.forEach(m => {
+        const tr = document.createElement('tr');
+        const timeStr = formatTime(m.time_sec);
+
+        tr.onclick = () => {
+          goToStep(m.step, true);
+        };
+
+        tr.innerHTML = `
+          <td><strong>${m.step}</strong></td>
+          <td style="font-family: monospace; color: #38bdf8;">${timeStr}</td>
+          <td style="font-weight: 700; color: #fbbf24;">${m.notation}</td>
+          <td><span style="background: rgba(255,255,255,0.08); padding: 2px 6px; border-radius: 4px; font-size: 11px;">${m.piece_count} 顆</span></td>
+          <td style="color: var(--text-muted); font-size: 12px;">${m.desc}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      resetLiveSubtitles();
+      renderFullSubtitles();
+      renderMovesTable();
+      renderBoardMilestone(1);
+
+      // Attempt to ensure unmuted
+      if (video) {
+        video.muted = false;
+        video.volume = 1.0;
+      }
+      updateVolumeUI();
+
+      // Auto-unlock audio on any first user click anywhere in the window
+      document.body.addEventListener('click', () => {
+        if (video && video.muted) {
+          video.muted = false;
+          video.volume = 1.0;
+          updateVolumeUI();
+        }
+      }, { once: true });
+
+      setTimeout(() => {
+        if (video.networkState === HTMLMediaElement.NETWORK_NO_SOURCE || video.error) {
+          fallbackOverlay.classList.add('active');
+        }
+      }, 1500);
+    });
+  
+    /* ===================== Pikafish 即時覆盤分析 ===================== */
+    const PF = {
+      enabled: true, token: 0, sideOverride: {}, lines: {}, fen: '', side: 'w',
+      board: null, depth: 0, multipv: 3
+    };
+    const PF_LETTER = { '車':'r','馬':'n','相':'b','象':'b','仕':'a','士':'a','帥':'k','將':'k','炮':'c','砲':'c','兵':'p','卒':'p' };
+    const PF_RED_NUM = ['', '一','二','三','四','五','六','七','八','九'];
+    const PF_BLK_NUM = ['', '１','２','３','４','５','６','７','８','９'];
+
+    function pfBoardFromPieces(pieces) {
+      const b = Array.from({ length: 10 }, () => Array(9).fill(null));
+      pieces.forEach(p => { b[p.r][p.c] = { side: p.side, name: p.name }; });
+      return b;
+    }
+
+    function pfGuessSide(stepIndex) {
+      if (PF.sideOverride[stepIndex]) return PF.sideOverride[stepIndex];
+      if (stepIndex <= 1) return 'w';
+      const key = (m, side) => m.pieces.filter(p => p.side === side).map(p => `${p.name}${p.r}${p.c}`).sort().join('|');
+      const cur = MILESTONES[stepIndex - 1], prev = MILESTONES[stepIndex - 2];
+      const redMoved = key(cur, 'red') !== key(prev, 'red');
+      const blkMoved = key(cur, 'black') !== key(prev, 'black');
+      if (redMoved && !blkMoved) return 'b';
+      if (blkMoved && !redMoved) return 'w';
+      return 'w';
+    }
+
+    function pfFen(board, side) {
+      const rows = [];
+      for (let r = 9; r >= 0; r--) {
+        let s = '', e = 0;
+        for (let c = 0; c < 9; c++) {
+          const p = board[r][c];
+          if (!p) { e++; continue; }
+          if (e) { s += e; e = 0; }
+          const l = PF_LETTER[p.name] || '?';
+          s += p.side === 'red' ? l.toUpperCase() : l;
+        }
+        if (e) s += e;
+        rows.push(s);
+      }
+      return rows.join('/') + ' ' + side;
+    }
+
+    // UCI 座標 (a0..i9) ↔ 本系統 (r,c)：file = c, rank = r
+    function pfSq(s) { return { c: s.charCodeAt(0) - 97, r: parseInt(s.slice(1), 10) }; }
+
+    function pfMoveToChinese(board, uci) {
+      const f = pfSq(uci.slice(0, 2)), t = pfSq(uci.slice(2, 4));
+      const p = board[f.r] && board[f.r][f.c];
+      if (!p) return uci;
+      const red = p.side === 'red';
+      const NUM = red ? PF_RED_NUM : PF_BLK_NUM;
+      const fileNo = c => red ? 9 - c : c + 1;
+      // 同一路有兩個以上同兵種 → 前/中/後
+      const same = [];
+      for (let r = 0; r < 10; r++) {
+        const q = board[r][f.c];
+        if (q && q.side === p.side && q.name === p.name) same.push(r);
+      }
+      let head = p.name + NUM[fileNo(f.c)];
+      if (same.length >= 2) {
+        same.sort((a, b) => red ? b - a : a - b);   // 由前到後
+        const idx = same.indexOf(f.r);
+        const tags = same.length === 2 ? ['前', '後'] : ['前', '中', '後'];
+        head = (tags[idx] || '後') + p.name;
+      }
+      let act, num;
+      if (t.r === f.r) { act = '平'; num = fileNo(t.c); }
+      else {
+        const forward = red ? t.r > f.r : t.r < f.r;
+        act = forward ? '進' : '退';
+        num = '馬相象仕士'.includes(p.name) ? fileNo(t.c) : Math.abs(t.r - f.r);
+      }
+      return head + act + NUM[num];
+    }
+
+    function pfApply(board, uci) {
+      const f = pfSq(uci.slice(0, 2)), t = pfSq(uci.slice(2, 4));
+      const b = board.map(row => row.slice());
+      b[t.r][t.c] = b[f.r][f.c];
+      b[f.r][f.c] = null;
+      return b;
+    }
+
+    function pfPvChinese(board, pv, max = 8) {
+      let b = board; const out = [];
+      for (const mv of pv.slice(0, max)) {
+        if (!/^[a-i]\d[a-i]\d$/.test(mv)) break;
+        out.push(pfMoveToChinese(b, mv));
+        b = pfApply(b, mv);
+      }
+      return out.join(' ');
+    }
+
+    // 分數一律換成「紅方視角」
+    function pfRedScore(info, side) {
+      const sign = side === 'w' ? 1 : -1;
+      return { type: info.score_type, v: info.score * sign };
+    }
+    function pfScoreText(s) {
+      if (s.type === 'mate') return s.v > 0 ? `紅 ${Math.abs(s.v)} 步殺` : `黑 ${Math.abs(s.v)} 步殺`;
+      const v = (s.v / 100).toFixed(2);
+      return s.v > 0 ? `+${v}` : v;
+    }
+    function pfBarPercent(s) {
+      if (s.type === 'mate') return s.v > 0 ? 100 : 0;
+      return Math.max(2, Math.min(98, 50 + 50 * (2 / (1 + Math.exp(-s.v / 300)) - 1)));
+    }
+
+    function pfDrawArrow(uci) {
+      const svg = document.getElementById('pfArrow');
+      if (!svg) return;
+      svg.innerHTML = '';
+      if (!uci || !/^[a-i]\d[a-i]\d$/.test(uci)) return;
+      const f = pfSq(uci.slice(0, 2)), t = pfSq(uci.slice(2, 4));
+      const a = getPercentPos(f.r, f.c), b = getPercentPos(t.r, t.c);
+      svg.innerHTML = `
+        <defs><marker id="pfHead" markerWidth="4" markerHeight="4" refX="2.2" refY="2" orient="auto">
+          <path d="M0,0 L4,2 L0,4 z" fill="rgba(34,197,94,0.9)"/></marker></defs>
+        <line x1="${a.left}" y1="${a.top}" x2="${b.left}" y2="${b.top}" stroke="rgba(34,197,94,0.85)"
+          stroke-width="1.6" stroke-linecap="round" marker-end="url(#pfHead)"/>`;
+    }
+
+    function pfRender() {
+      const box = document.getElementById('pfLines');
+      const keys = Object.keys(PF.lines).map(Number).sort((a, b) => a - b);
+      if (!keys.length) return;
+      const top = PF.lines[keys[0]];
+      const s = pfRedScore(top, PF.side);
+      document.getElementById('pfScore').textContent = pfScoreText(s);
+      document.getElementById('pfDepth').textContent = `深度 ${top.depth}` + (top.nps ? ` · ${(top.nps / 1000).toFixed(0)}k 節點/秒` : '');
+      document.getElementById('pfBarFill').style.height = pfBarPercent(s) + '%';
+      pfDrawArrow(top.pv[0]);
+      box.innerHTML = keys.map(k => {
+        const L = PF.lines[k];
+        const sc = pfScoreText(pfRedScore(L, PF.side));
+        return `<div class="pf-line"><span class="pf-line-score">${sc}</span><span class="pf-line-pv">${pfPvChinese(PF.board, L.pv)}</span></div>`;
+      }).join('');
+    }
+
+    function pfStatus(msg) { document.getElementById('pfStatus').textContent = msg; }
+
+
+    /* ---- 引擎後端：本機 server.py（原生 Pikafish）或瀏覽器 WebAssembly ---- */
+    function pfParseInfo(line) {
+      const t = line.trim().split(/\s+/); const d = {};
+      for (let i = 1; i < t.length; ) {
+        const k = t[i];
+        if (['depth','seldepth','multipv','nodes','nps','time'].includes(k)) { d[k] = parseInt(t[i+1], 10); i += 2; }
+        else if (k === 'score') { d.score_type = t[i+1]; d.score = parseInt(t[i+2], 10); i += 3;
+          if (t[i] === 'lowerbound' || t[i] === 'upperbound') { d.bound = t[i]; i++; } }
+        else if (k === 'pv') { d.pv = t.slice(i+1); break; }
+        else i++;
+      }
+      return (d.pv && d.score !== undefined) ? d : null;
+    }
+
+    const PFServer = {
+      es: null,
+      start(fen, multipv, cb) {
+        this.stop();
+        const es = new EventSource(`/api/analyze?fen=${encodeURIComponent(fen)}&multipv=${multipv}`);
+        this.es = es;
+        es.onmessage = (ev) => {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'info') cb.info(msg.data);
+          else if (msg.type === 'bestmove') { cb.best(msg.data); this.stop(); }
+        };
+        es.onerror = () => {
+          if (this.es !== es) return;
+          this.stop();
+          fetch('/api/engine').then(r => r.json()).then(j => {
+            cb.status(j.ok ? '連線中斷，切換節點即可重新分析' : `引擎未啟動：${j.error || ''}`);
+          }).catch(() => cb.status('無法連線到本機伺服器'));
+        };
+      },
+      stop() { if (this.es) { this.es.close(); this.es = null; } }
+    };
+
+    const PFWasm = {
+      worker: null, ready: false, searching: false, ignoreBest: 0, queued: null, cb: null,
+      init(cb) {
+        if (this.worker) return;
+        if (!window.crossOriginIsolated) { cb.status('瀏覽器尚未啟用跨源隔離，重新整理一次頁面再試'); return; }
+        const base = new URL('engine/', location.href).href;
+        const w = new Worker(base + 'worker.js');
+        this.worker = w;
+        cb.status('載入 Pikafish（第一次約 50 MB）…');
+        w.onmessage = ({ data }) => {
+          if (data.type === 'net-progress') {
+            const pct = data.total ? Math.round(data.loaded / data.total * 100) : Math.round(data.loaded / 507064);
+            (this.cb || cb).status(`下載神經網路權重 ${pct}%`);
+          } else if (data.type === 'ready') {
+            const th = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 2) - 1));
+            this.send('uci'); this.send(`setoption name Threads value ${th}`);
+            this.send('setoption name Hash value 64'); this.send('isready');
+          } else if (data.type === 'line') {
+            const line = data.line;
+            if (line === 'readyok' && !this.ready) {
+              this.ready = true;
+              document.getElementById('pfEngineName').textContent = 'Pikafish（瀏覽器版）';
+              if (this.queued) { const q = this.queued; this.queued = null; this.launch(q); }
+            } else if (line.startsWith('bestmove')) {
+              this.searching = false;
+              if (this.ignoreBest > 0) { this.ignoreBest--; }
+              else if (this.cb) this.cb.best(line.split(/\s+/)[1] || '');
+              if (this.queued && this.ignoreBest === 0) { const q = this.queued; this.queued = null; this.launch(q); }
+            } else if (line.startsWith('info') && line.includes(' pv ') && this.ignoreBest === 0 && this.cb) {
+              const d = pfParseInfo(line); if (d) this.cb.info(d);
+            }
+          } else if (data.type === 'error') {
+            (this.cb || cb).status('Pikafish 載入失敗：' + data.error);
+          }
+        };
+        w.postMessage({ type: 'init', jsUrl: base + 'pikafish.js', wasmUrl: base + 'pikafish.wasm', netUrl: base + 'pikafish.nnue' });
+      },
+      send(c) { this.worker.postMessage({ type: 'command', command: c }); },
+      launch(job) {
+        this.cb = job.cb;
+        this.send(`setoption name MultiPV value ${job.multipv}`);
+        this.send(`position fen ${job.fen}`);
+        this.send('go movetime 60000');
+        this.searching = true;
+        job.cb.status('Pikafish 分析中…');
+      },
+      start(fen, multipv, cb) {
+        this.cb = null;
+        this.init(cb);
+        if (!this.worker) return;
+        const job = { fen, multipv, cb };
+        if (!this.ready) { this.queued = job; return; }
+        if (this.searching) { this.ignoreBest++; this.send('stop'); this.searching = false; this.queued = job; return; }
+        if (this.ignoreBest > 0) { this.queued = job; return; }
+        this.launch(job);
+      },
+      stop() {
+        this.cb = null; this.queued = null;
+        if (this.worker && this.searching) { this.ignoreBest++; this.send('stop'); this.searching = false; }
+      }
+    };
+
+    let PFBackend = null;
+    async function pfPickBackend() {
+      if (PFBackend) return PFBackend;
+      if (location.protocol !== 'file:') {
+        try {
+          const r = await fetch('api/engine', { cache: 'no-store' });
+          if (r.ok) { const j = await r.json(); if (j.ok) { PFBackend = PFServer;
+            document.getElementById('pfEngineName').textContent = j.name; return PFBackend; } }
+        } catch (e) {}
+      }
+      PFBackend = PFWasm;
+      return PFBackend;
+    }
+
+    function pfStop() { if (PFBackend) PFBackend.stop(); }
+
+    async function pfAnalyze(stepIndex) {
+      pfStop();
+      PF.lines = {};
+      document.getElementById('pfLines').innerHTML = '';
+      document.getElementById('pfScore').textContent = '--';
+      document.getElementById('pfDepth').textContent = '';
+      pfDrawArrow(null);
+      const m = MILESTONES[stepIndex - 1];
+      if (!m) return;
+      PF.board = pfBoardFromPieces(m.pieces);
+      PF.side = pfGuessSide(stepIndex);
+      document.getElementById('pfSideBtn').textContent = PF.side === 'w' ? '輪到：紅方' : '輪到：黑方';
+      PF.fen = pfFen(PF.board, PF.side);
+      document.getElementById('pfFen').textContent = PF.fen;
+      if (!PF.enabled) { pfStatus('分析已暫停'); return; }
+      if (location.protocol === 'file:') { pfStatus('請用 run.bat 或網頁版開啟（直接開檔案無法跑引擎）'); return; }
+      const token = ++PF.token;
+      const backend = await pfPickBackend();
+      if (token !== PF.token) return;
+      pfStatus('Pikafish 分析中…');
+      backend.start(PF.fen, PF.multipv, {
+        info: (d) => { if (token !== PF.token || d.bound) return; PF.lines[d.multipv || 1] = d; pfRender(); },
+        best: (mv) => { if (token !== PF.token) return;
+          pfStatus(!mv || mv === '(none)' ? '此局面已無合法著法（被將死或困斃）' : '分析完成'); },
+        status: (msg) => { if (token === PF.token) pfStatus(msg); }
+      });
+    }
+
+    function pfToggleSide() {
+      const cur = PF.side === 'w' ? 'b' : 'w';
+      PF.sideOverride[currentStep] = cur;
+      pfAnalyze(currentStep);
+    }
+    function pfToggleEnabled(on) {
+      PF.enabled = on;
+      if (!on) { pfStop(); pfStatus('分析已暫停'); pfDrawArrow(null); }
+      else pfAnalyze(currentStep);
+    }
+    function pfSetMultiPV(n) { PF.multipv = parseInt(n, 10) || 3; pfAnalyze(currentStep); }
+
+    window.addEventListener('DOMContentLoaded', () => {
+    });
+    /* =================== Pikafish 即時覆盤分析 end =================== */
+  </script>
+</body>
+</html>
