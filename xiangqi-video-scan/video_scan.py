@@ -1,0 +1,671 @@
+# -*- coding: utf-8 -*-
+"""
+象棋影片自動覆盤：YouTube 播放清單 → 下載 → 辨識棋步 → 開局分類 → 依勝方分先後手
+
+用法（在 xiangqi_web_demo 資料夾裡）：
+    python video_scan.py "播放清單或影片網址"
+    python video_scan.py "網址" --browser edge      # 私人清單：借用 Edge 的 YouTube 登入
+    python video_scan.py "網址" --cookies cookies.txt
+    python video_scan.py --local 某資料夾或某個.mp4   # 不下載，直接辨識本機影片
+
+輸出在 video_results/：
+    總表.csv                         每盤一列（Excel 可直接開）
+    先手勝(紅)/<開局>/xxx.pgn        中文棋譜，含老師示範的變化
+    後手勝(黑)/<開局>/xxx.pgn
+    未分勝負/<開局>/xxx.pgn
+    _debug/                          棋盤定位截圖（確認格點有對準）
+
+只適用電腦 2D 棋盤畫面。原理：先在影片中找到「開局完整盤面」定出 9x10 格點，
+之後每 0.25 秒判斷每個交叉點是「空 / 紅子 / 黑子」，再用合法著法比對出每一步，
+所以不需要認棋子上的字，被字幕或特效短暫遮住也能撐過去。
+"""
+import argparse
+import csv
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+import cv2
+import numpy as np
+
+from xq_core import Position, START_FEN, classify_opening
+
+VERSION = '1.0'
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
+START = Position.from_fen(START_FEN)
+START_GRID = START.color_grid()
+
+RESULT_DIR = {'w': '先手勝(紅)', 'b': '後手勝(黑)', None: '未分勝負'}
+
+
+def log(*a):
+    print(*a, flush=True)
+
+
+# ====================================================================
+# 下載
+# ====================================================================
+
+def _ydl_opts(args, extra=None):
+    o = {'quiet': True, 'no_warnings': True, 'ignoreerrors': True}
+    if args.browser:
+        o['cookiesfrombrowser'] = (args.browser,)
+    if args.cookies:
+        o['cookiefile'] = args.cookies
+    if extra:
+        o.update(extra)
+    return o
+
+
+def list_videos(url, args):
+    import yt_dlp
+    with yt_dlp.YoutubeDL(_ydl_opts(args, {'extract_flat': 'in_playlist'})) as y:
+        info = y.extract_info(url, download=False)
+    if not info:
+        raise RuntimeError('讀不到這個網址。私人清單請加 --browser edge（或 chrome / firefox），或改成「不公開」。')
+    if info.get('_type') == 'playlist' or 'entries' in info:
+        out, seen = [], set()
+        for e in info.get('entries') or []:
+            if not e or not e.get('id') or e['id'] in seen:
+                continue
+            seen.add(e['id'])
+            out.append({'id': e['id'], 'title': e.get('title') or e['id'],
+                        'url': 'https://www.youtube.com/watch?v=' + e['id']})
+        return info.get('title') or '播放清單', out
+    return info.get('title'), [{'id': info['id'], 'title': info.get('title') or info['id'],
+                                'url': 'https://www.youtube.com/watch?v=' + info['id']}]
+
+
+def download(video, args, cache_dir):
+    import yt_dlp
+    hits = glob.glob(os.path.join(cache_dir, video['id'] + '.*'))
+    hits = [h for h in hits if not h.endswith('.part')]
+    if hits:
+        return hits[0]
+    opts = _ydl_opts(args, {
+        # 只要畫面，不要聲音；720p 以下就夠辨識
+        'format': 'bv*[height<=720][ext=mp4]/bv*[height<=720]/b[height<=720]/b',
+        'outtmpl': os.path.join(cache_dir, '%(id)s.%(ext)s'),
+        'ignoreerrors': False,
+    })
+    with yt_dlp.YoutubeDL(opts) as y:
+        y.download([video['url']])
+    hits = [h for h in glob.glob(os.path.join(cache_dir, video['id'] + '.*')) if not h.endswith('.part')]
+    if not hits:
+        raise RuntimeError('下載失敗')
+    return hits[0]
+
+
+# ====================================================================
+# 棋盤定位與每格判斷
+# ====================================================================
+
+def norm_frame(f):
+    h, w = f.shape[:2]
+    if h != 720:
+        s = 720.0 / h
+        f = cv2.resize(f, (int(round(w * s)), 720), interpolation=cv2.INTER_AREA)
+    return f
+
+
+def hough(gray, rmin, rmax, mindist, p2=0.8):
+    g = cv2.GaussianBlur(gray, (5, 5), 1.2)
+    c = cv2.HoughCircles(g, cv2.HOUGH_GRADIENT_ALT, dp=1.5, minDist=mindist, param1=120, param2=p2,
+                         minRadius=int(rmin), maxRadius=int(rmax))
+    if c is None:
+        return []
+    return [tuple(map(float, x)) for x in c[0]]
+
+
+def color_frac(hsv, x, y, r):
+    """棋子上的字：紅字像素 /（紅字+深色字）。紅子接近 1，黑子接近 0。"""
+    r = max(4, int(r * 0.62))
+    x, y = int(round(x)), int(round(y))
+    h, w = hsv.shape[:2]
+    x0, x1, y0, y1 = max(0, x - r), min(w, x + r + 1), max(0, y - r), min(h, y + r + 1)
+    patch = hsv[y0:y1, x0:x1]
+    if patch.size == 0:
+        return 0.5
+    yy, xx = np.ogrid[y0 - y:y1 - y, x0 - x:x1 - x]
+    m = (xx * xx + yy * yy) <= r * r
+    H, S, V = patch[..., 0][m], patch[..., 1][m], patch[..., 2][m]
+    red = np.count_nonzero(((H <= 10) | (H >= 165)) & (S >= 90) & (V >= 60))
+    dark = np.count_nonzero((V <= 95) & ~(((H <= 10) | (H >= 165)) & (S >= 90)))
+    return red / (red + dark + 1.0)
+
+
+class Grid:
+    """影片畫面上的 9x10 格點。vr/vc 是畫面座標，flip=True 表示紅方在畫面上方。"""
+
+    def __init__(self, x0, y0, sx, sy, flip, thr):
+        self.x0, self.y0, self.sx, self.sy, self.flip, self.thr = x0, y0, sx, sy, flip, thr
+        self.s = (sx + sy) / 2.0
+
+    def px(self, vr, vc):
+        return self.x0 + vc * self.sx, self.y0 + vr * self.sy
+
+    def to_norm(self, vr, vc):
+        return (9 - vr, 8 - vc) if self.flip else (vr, vc)
+
+    def to_json(self):
+        return dict(x0=self.x0, y0=self.y0, sx=self.sx, sy=self.sy, flip=self.flip, thr=self.thr)
+
+    def observe(self, frame):
+        """回傳 10x9（標準方向，紅方在下）的 'E'/'R'/'B'。"""
+        s = self.s
+        x_lo, x_hi = int(max(0, self.x0 - s)), int(min(frame.shape[1], self.x0 + 8 * self.sx + s))
+        y_lo, y_hi = int(max(0, self.y0 - s)), int(min(frame.shape[0], self.y0 + 9 * self.sy + s))
+        roi = frame[y_lo:y_hi, x_lo:x_hi]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        circles = hough(gray, s * 0.30, s * 0.58, s * 0.62)
+        obs = [['E'] * 9 for _ in range(10)]
+        best = {}
+        for (x, y, r) in circles:
+            gx, gy = x + x_lo, y + y_lo
+            vc = int(round((gx - self.x0) / self.sx))
+            vr = int(round((gy - self.y0) / self.sy))
+            if not (0 <= vr < 10 and 0 <= vc < 9):
+                continue
+            cx, cy = self.px(vr, vc)
+            d = ((gx - cx) ** 2 + (gy - cy) ** 2) ** 0.5
+            if d > 0.33 * s:
+                continue
+            if (vr, vc) not in best or d < best[(vr, vc)][0]:
+                best[(vr, vc)] = (d, x, y, r)
+        for (vr, vc), (_, x, y, r) in best.items():
+            f = color_frac(hsv, x, y, r)
+            nr, nc = self.to_norm(vr, vc)
+            obs[nr][nc] = 'R' if f >= self.thr else 'B'
+        return obs
+
+
+def _uniform_run(xs, n=9, tol=0.22):
+    """在排序好的 x 座標中找出 n 個等距點，回傳 (起點, 間距) 或 None。"""
+    xs = sorted(xs)
+    if len(xs) < n:
+        return None
+    for i in range(len(xs) - n + 1):
+        seg = xs[i:i + n]
+        d = np.diff(seg)
+        md = np.median(d)
+        if md > 0 and np.all(np.abs(d - md) <= tol * md):
+            return seg[0], (seg[-1] - seg[0]) / (n - 1)
+    return None
+
+
+def find_start_grid(frame):
+    """在畫面中找開局完整盤面；找到回傳 Grid，否則 None。"""
+    h = frame.shape[0]
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    cs = hough(gray, h / 60.0, h / 13.0, h / 40.0)
+    if len(cs) < 28:
+        return None
+    rmed = float(np.median([c[2] for c in cs]))
+    cs = [c for c in cs if 0.7 * rmed <= c[2] <= 1.35 * rmed]
+    # 依 y 分列
+    cs.sort(key=lambda c: c[1])
+    rows, cur = [], [cs[0]]
+    for c in cs[1:]:
+        if abs(c[1] - cur[-1][1]) <= 0.5 * rmed:
+            cur.append(c)
+        else:
+            rows.append(cur)
+            cur = [c]
+    rows.append(cur)
+    backs = []
+    for row in rows:
+        run = _uniform_run([c[0] for c in row])
+        if run:
+            backs.append((float(np.mean([c[1] for c in row])), run))
+    if len(backs) < 2:
+        return None
+    backs.sort()
+    (ytop, (x0a, sxa)), (ybot, (x0b, sxb)) = backs[0], backs[-1]
+    if abs(x0a - x0b) > 0.3 * sxa or abs(sxa - sxb) > 0.1 * sxa:
+        return None
+    x0, sx = (x0a + x0b) / 2, (sxa + sxb) / 2
+    sy = (ybot - ytop) / 9.0
+    if not (0.8 * sx <= sy <= 1.25 * sx):
+        return None
+    if not (0.3 * sx <= rmed <= 0.6 * sx):
+        return None
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    # 對照開局 32 子
+    occ = {}
+    for (x, y, r) in cs:
+        vc = int(round((x - x0) / sx))
+        vr = int(round((y - ytop) / sy))
+        if 0 <= vr < 10 and 0 <= vc < 9:
+            if abs(x - (x0 + vc * sx)) < 0.3 * sx and abs(y - (ytop + vr * sy)) < 0.3 * sy:
+                occ[(vr, vc)] = (x, y, r)
+    need = [(r, c) for r in range(10) for c in range(9) if START_GRID[r][c] != 'E']
+    hit = sum(1 for k in need if k in occ)
+    extra = sum(1 for k in occ if START_GRID[k[0]][k[1]] == 'E')
+    if hit < 30 or extra > 2:
+        return None
+    top = [color_frac(hsv, *occ[k]) for k in occ if k[0] <= 4]
+    bot = [color_frac(hsv, *occ[k]) for k in occ if k[0] >= 5]
+    mt, mb = float(np.median(top)), float(np.median(bot))
+    if abs(mt - mb) < 0.15:
+        return None
+    flip = mt > mb  # 紅方在上
+    thr = (mt + mb) / 2.0
+    return Grid(x0, ytop, sx, sy, flip, thr)
+
+
+def mismatch(grid_a, obs):
+    n = 0
+    for r in range(10):
+        ra, ro = grid_a[r], obs[r]
+        for c in range(9):
+            if ra[c] != ro[c]:
+                n += 1
+    return n
+
+
+# ====================================================================
+# 追蹤棋步（含老師退回去示範的變化）
+# ====================================================================
+
+class Node:
+    __slots__ = ('pos', 'grid', 'move', 'cn', 'parent', 'children', 't')
+
+    def __init__(self, pos, move=None, cn=None, parent=None, t=0.0):
+        self.pos, self.move, self.cn, self.parent, self.t = pos, move, cn, parent, t
+        self.grid = pos.color_grid()
+        self.children = []
+
+
+class Tracker:
+    def __init__(self, persist=2):
+        self.root = Node(START)
+        self.cur = self.root
+        self.pending = None
+        self.persist = persist
+        self.takebacks = 0
+        self.nodes = 1
+
+    def _succ(self, node):
+        out = []
+        for mv in node.pos.legal_moves():
+            q = node.pos.make(mv)
+            out.append((mv, q, q.color_grid()))
+        return out
+
+    def feed(self, obs, t):
+        d_cur = mismatch(self.cur.grid, obs)
+        if d_cur <= 1:
+            self.pending = None
+            return
+        best = None  # (d, key, action)
+        succ = self._succ(self.cur)
+        for mv, q, g in succ:
+            d = mismatch(g, obs)
+            if best is None or d < best[0]:
+                best = (d, ('m', mv), ('move', [mv]))
+        anc, k = self.cur.parent, 0
+        while anc is not None and k < 60:
+            d = mismatch(anc.grid, obs)
+            if d < best[0]:
+                best = (d, ('b', id(anc)), ('back', anc))
+            anc, k = anc.parent, k + 1
+        if best[0] > 2 and d_cur >= 4:
+            # 影片跳太快：試連走兩步
+            for mv, q, g in succ:
+                if mismatch(g, obs) >= d_cur:
+                    continue
+                for mv2 in q.legal_moves():
+                    q2 = q.make(mv2)
+                    d = mismatch(q2.color_grid(), obs)
+                    if d < best[0]:
+                        best = (d, ('m2', mv, mv2), ('move', [mv, mv2]))
+        if best[0] <= 2 and best[0] + 2 <= d_cur:
+            if self.pending and self.pending[0] == best[1]:
+                self.pending[1] += 1
+            else:
+                self.pending = [best[1], 1]
+            if self.pending[1] >= self.persist:
+                self._apply(best[2], t)
+                self.pending = None
+        else:
+            self.pending = None
+
+    def _apply(self, action, t):
+        kind, val = action
+        if kind == 'back':
+            self.cur = val
+            self.takebacks += 1
+            return
+        for mv in val:
+            node = next((ch for ch in self.cur.children if ch.move == mv), None)
+            if node is None:
+                cn = self.cur.pos.move_cn(mv)
+                node = Node(self.cur.pos.make(mv), mv, cn, self.cur, t)
+                self.cur.children.append(node)
+                self.nodes += 1
+            self.cur = node
+
+
+def main_line(node):
+    line = []
+    while node.children:
+        node = node.children[0]
+        line.append(node)
+    return line
+
+
+def pgn_moves(start_node, start_ply=0):
+    """start_node 之後的著法（第一個孩子是主線，其餘放括號當變化）。"""
+    out = []
+
+    def num(ply, force):
+        if ply % 2 == 0:
+            return '%d. ' % (ply // 2 + 1)
+        return ('%d... ' % (ply // 2 + 1)) if force else ''
+
+    def walk(node, ply, force):
+        while node.children:
+            main = node.children[0]
+            out.append(num(ply, force) + main.cn)
+            for alt in node.children[1:]:
+                out.append('(' + num(ply, True) + alt.cn)
+                walk(alt, ply + 1, False)
+                out[-1] += ')'
+            force = len(node.children) > 1
+            node, ply = main, ply + 1
+
+    walk(start_node, start_ply, False)
+    return ' '.join(out)
+
+
+# ====================================================================
+# Pikafish 判斷終局
+# ====================================================================
+
+class Engine:
+    def __init__(self):
+        pats = ['Pikafish-Windows*.exe', 'pikafish*.exe'] if sys.platform == 'win32' else ['pikafish*']
+        path = None
+        for p in pats:
+            hits = [h for h in sorted(glob.glob(os.path.join(ENGINE_DIR, p))) if not h.endswith('.nnue')]
+            if hits:
+                path = hits[0]
+                break
+        if not path:
+            raise RuntimeError('engine 資料夾找不到 Pikafish')
+        flags = 0x08000000 if sys.platform == 'win32' else 0  # 不跳出黑視窗
+        self.p = subprocess.Popen([path], cwd=ENGINE_DIR, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, text=True, bufsize=1, creationflags=flags)
+        self._send('uci')
+        self._wait('uciok')
+        self._send('isready')
+        self._wait('readyok')
+
+    def _send(self, s):
+        self.p.stdin.write(s + '\n')
+        self.p.stdin.flush()
+
+    def _wait(self, tok):
+        while True:
+            line = self.p.stdout.readline()
+            if not line:
+                raise RuntimeError('Pikafish 結束了')
+            if line.startswith(tok):
+                return line
+
+    def eval(self, fen, depth=16):
+        """回傳走棋方視角分數（centipawn），將死以 ±30000 表示。"""
+        self._send('position fen ' + fen)
+        self._send('go depth %d' % depth)
+        score = 0
+        while True:
+            line = self.p.stdout.readline()
+            if not line:
+                break
+            m = re.search(r'score (cp|mate) (-?\d+)', line)
+            if m and ' pv ' in line:
+                v = int(m.group(2))
+                score = v if m.group(1) == 'cp' else (30000 - abs(v)) * (1 if v > 0 else -1)
+            if line.startswith('bestmove'):
+                break
+        return score
+
+    def close(self):
+        try:
+            self._send('quit')
+        except Exception:
+            pass
+
+
+TITLE_HINT = [(r'红胜|紅勝|红方胜|紅方勝|先手胜|先手勝', 'w'), (r'黑胜|黑勝|黑方胜|黑方勝|后手胜|後手勝', 'b')]
+
+
+def judge(pos, engine, title, depth, margin):
+    if not pos.legal_moves():
+        win = 'b' if pos.turn == 'w' else 'w'
+        return win, '絕殺/困斃（%s無棋可走）' % ('紅方' if pos.turn == 'w' else '黑方')
+    if engine is not None:
+        try:
+            sc = engine.eval(pos.fen(), depth)
+            red = sc if pos.turn == 'w' else -sc
+            if red >= margin:
+                return 'w', '終局引擎評分 紅%+d' % red
+            if red <= -margin:
+                return 'b', '終局引擎評分 紅%+d' % red
+            reason = '終局引擎評分 紅%+d（差距不足）' % red
+        except Exception as e:
+            reason = '引擎錯誤：%s' % e
+    else:
+        reason = '未啟用引擎'
+    for pat, side in TITLE_HINT:
+        if re.search(pat, title or ''):
+            return side, reason + '；依標題'
+    return None, reason
+
+
+# ====================================================================
+# 單支影片
+# ====================================================================
+
+def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video'):
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise RuntimeError('打不開影片')
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    every = max(1, int(round(fps * step)))
+    search_every = max(1, int(round(fps * 0.5)))
+    grid, tracker = None, None
+    idx = 0
+    t0 = time.time()
+    while True:
+        ok = cap.grab()
+        if not ok:
+            break
+        want = (idx % (every if grid else search_every)) == 0
+        if want:
+            ok, frame = cap.retrieve()
+            if not ok:
+                break
+            frame = norm_frame(frame)
+            t = idx / fps
+            if grid is None:
+                grid = find_start_grid(frame)
+                if grid is not None:
+                    tracker = Tracker(persist)
+                    log('    找到開局盤面 @ %d:%02d（%s在上方）' % (int(t) // 60, int(t) % 60,
+                                                       '紅方' if grid.flip else '黑方'))
+                    if debug_dir:
+                        dbg = frame.copy()
+                        for vr in range(10):
+                            for vc in range(9):
+                                x, y = grid.px(vr, vc)
+                                cv2.circle(dbg, (int(x), int(y)), 4, (0, 255, 0), -1)
+                        cv2.imwrite(os.path.join(debug_dir, vid + '_grid.jpg'), dbg)
+            else:
+                tracker.feed(grid.observe(frame), t)
+            if idx % int(fps * 60) == 0 and total:
+                log('    %d%%（已辨識 %d 個局面，%.0f 秒）' % (100 * idx // total, tracker.nodes if tracker else 0,
+                                                    time.time() - t0))
+        idx += 1
+    cap.release()
+    return grid, tracker
+
+
+# ====================================================================
+# 輸出
+# ====================================================================
+
+def safe_name(s, n=40):
+    s = re.sub(r'[\\/:*?"<>|\r\n\t#]+', '_', s or '').strip(' ._')
+    return s[:n] or 'untitled'
+
+
+def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv_rows):
+    line = [branch_root] + main_line(branch_root)
+    cn = [n.cn for n in line]
+    family, detail = classify_opening(cn)
+    final = line[-1].pos
+    win, reason = judge(final, engine, video.get('title'), args.depth, args.margin)
+    res_tag = {'w': '1-0', 'b': '0-1', None: '*'}[win]
+    sub = os.path.join(out_dir, RESULT_DIR[win], safe_name(detail))
+    os.makedirs(sub, exist_ok=True)
+    fname = '%s_%s%s.pgn' % (safe_name(video.get('title'), 30), video['id'], ('_%d' % gi) if gi else '')
+    fpath = os.path.join(sub, fname)
+    # 這條分支（含其中的變化）
+    fake = Node(START)
+    fake.children = [branch_root]
+    moves = pgn_moves(fake)
+    host = '黑方' if grid.flip else '紅方'
+    with open(fpath, 'w', encoding='utf-8') as f:
+        f.write('[Game "Chinese Chess"]\n')
+        f.write('[Event "%s"]\n' % (video.get('title') or '').replace('"', "'"))
+        f.write('[Site "%s"]\n' % video.get('url', ''))
+        f.write('[Result "%s"]\n' % res_tag)
+        f.write('[Opening "%s"]\n' % detail)
+        f.write('[Annotator "video_scan %s"]\n' % VERSION)
+        f.write('[Format "Chinese"]\n')
+        f.write('{勝方判定：%s；畫面下方（主播）執%s；退回示範 %d 次}\n' % (reason, host, tracker.takebacks))
+        f.write(moves + ' ' + res_tag + '\n')
+    csv_rows.append({
+        '結果': RESULT_DIR[win], '開局大類': family, '開局': detail, '主線步數': len(cn),
+        '判定依據': reason, '主播執': host, '標題': video.get('title'), '網址': video.get('url', ''),
+        '前20步': ' '.join(cn[:20]), '終局FEN': final.fen(), '棋譜檔': os.path.relpath(fpath, out_dir),
+    })
+    log('    → %s｜%s｜%d 步｜%s' % (RESULT_DIR[win], detail, len(cn), reason))
+
+
+CSV_FIELDS = ['結果', '開局大類', '開局', '主線步數', '判定依據', '主播執', '標題', '網址', '前20步', '終局FEN', '棋譜檔']
+
+
+def append_csv(path, rows):
+    new = not os.path.exists(path)
+    with open(path, 'a', encoding='utf-8-sig' if new else 'utf-8', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        if new:
+            w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+
+def process(video, path, out_dir, engine, args):
+    dbg = os.path.join(out_dir, '_debug')
+    os.makedirs(dbg, exist_ok=True)
+    grid, tracker = scan_video(path, args.step, args.persist, dbg, video['id'])
+    rows = []
+    if grid is None:
+        log('    ✗ 找不到開局完整盤面，略過')
+        return 'no_start', rows
+    branches = [ch for ch in tracker.root.children if len(main_line(ch)) + 1 >= args.min_moves]
+    if not branches:
+        log('    ✗ 辨識到的步數太少（%d 個局面），略過' % tracker.nodes)
+        return 'too_short', rows
+    for gi, br in enumerate(branches):
+        write_game(out_dir, video, gi, br, grid, tracker, engine, args, rows)
+    return 'ok', rows
+
+
+def main():
+    ap = argparse.ArgumentParser(description='象棋影片自動覆盤 v' + VERSION)
+    ap.add_argument('url', nargs='?', help='YouTube 播放清單或影片網址')
+    ap.add_argument('--local', help='改用本機影片（檔案或資料夾）')
+    ap.add_argument('--browser', help='借用瀏覽器登入讀私人清單：edge / chrome / firefox')
+    ap.add_argument('--cookies', help='cookies.txt 路徑')
+    ap.add_argument('--out', default=os.path.join(BASE_DIR, 'video_results'))
+    ap.add_argument('--cache', default=os.path.join(BASE_DIR, 'video_cache'))
+    ap.add_argument('--keep-video', action='store_true', help='辨識完保留影片檔（預設刪除）')
+    ap.add_argument('--limit', type=int, default=0, help='最多處理幾支')
+    ap.add_argument('--step', type=float, default=0.25, help='取樣間隔秒數')
+    ap.add_argument('--persist', type=int, default=2, help='同一局面連續出現幾次才算數')
+    ap.add_argument('--min-moves', type=int, default=6, help='少於幾步不輸出')
+    ap.add_argument('--depth', type=int, default=16, help='終局引擎深度')
+    ap.add_argument('--margin', type=int, default=300, help='引擎評分超過多少分判勝')
+    ap.add_argument('--no-engine', action='store_true')
+    ap.add_argument('--redo', action='store_true', help='已處理過的也重做')
+    args = ap.parse_args()
+    if not args.url and not args.local:
+        args.url = input('請貼上 YouTube 播放清單或影片網址：').strip().strip('"')
+    os.makedirs(args.out, exist_ok=True)
+    os.makedirs(args.cache, exist_ok=True)
+    done_path = os.path.join(args.out, '已處理.json')
+    done = json.load(open(done_path, encoding='utf-8')) if os.path.exists(done_path) else {}
+
+    engine = None
+    if not args.no_engine:
+        try:
+            engine = Engine()
+            log('Pikafish 已啟動，用來判斷終局勝負')
+        except Exception as e:
+            log('（Pikafish 未啟動：%s；勝負只看絕殺與標題）' % e)
+
+    if args.local:
+        files = [args.local] if os.path.isfile(args.local) else sorted(
+            glob.glob(os.path.join(args.local, '*.mp4')) + glob.glob(os.path.join(args.local, '*.webm')) +
+            glob.glob(os.path.join(args.local, '*.mkv')))
+        videos = [{'id': os.path.splitext(os.path.basename(p))[0], 'title': os.path.basename(p),
+                   'url': p, 'path': p} for p in files]
+        log('本機影片 %d 支' % len(videos))
+    else:
+        title, videos = list_videos(args.url, args)
+        log('「%s」共 %d 支影片' % (title, len(videos)))
+    if args.limit:
+        videos = videos[:args.limit]
+
+    csv_path = os.path.join(args.out, '總表.csv')
+    stats = {}
+    for i, v in enumerate(videos, 1):
+        if v['id'] in done and not args.redo:
+            log('[%d/%d] 已處理過，略過：%s' % (i, len(videos), v['title']))
+            continue
+        log('[%d/%d] %s' % (i, len(videos), v['title']))
+        try:
+            path = v.get('path') or download(v, args, args.cache)
+            status, rows = process(v, path, args.out, engine, args)
+            append_csv(csv_path, rows)
+            if not v.get('path') and not args.keep_video:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            status = 'error: %s' % e
+            log('    ✗ 錯誤：%s' % e)
+        done[v['id']] = {'title': v['title'], 'status': status, 'time': time.strftime('%Y-%m-%d %H:%M')}
+        json.dump(done, open(done_path, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+        stats[status.split(':')[0]] = stats.get(status.split(':')[0], 0) + 1
+    if engine:
+        engine.close()
+    log('\n完成：%s' % '，'.join('%s %d' % kv for kv in stats.items()))
+    log('結果在：%s' % args.out)
+
+
+if __name__ == '__main__':
+    main()
