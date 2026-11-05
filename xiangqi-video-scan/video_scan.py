@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.3.3'
+VERSION = '1.3.4'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -110,9 +110,20 @@ def download(video, args, cache_dir):
         'format': 'bv*[height<=720][ext=mp4]/bv*[height<=720]/b[height<=720]/b',
         'outtmpl': os.path.join(cache_dir, '%(id)s.%(ext)s'),
         'ignoreerrors': False,
+        'socket_timeout': 60,
+        'retries': 10,
+        'fragment_retries': 10,
     })
-    with yt_dlp.YoutubeDL(opts) as y:
-        y.download([video['url']])
+    for k in range(3):
+        try:
+            with yt_dlp.YoutubeDL(opts) as y:
+                y.download([video['url']])
+            break
+        except Exception as e:
+            if k == 2:
+                raise
+            log('    下載逾時或中斷，%d 秒後重試（%s）' % (10 * (k + 1), str(e)[:80]))
+            time.sleep(10 * (k + 1))
     hits = [h for h in glob.glob(os.path.join(cache_dir, video['id'] + '.*')) if not h.endswith('.part')]
     if not hits:
         raise RuntimeError('下載失敗')
@@ -384,6 +395,12 @@ class PieceReader:
     def ready(self):
         return self.frames >= 1 and len(self.sum) >= 12
 
+    def save(self, path):
+        """把這支影片學到的字樣存起來，給「一開始就是中局」的影片借用。"""
+        if not self.ready() or len(self.sum) < 14:
+            return
+        save_template_sets(path, [self])
+
     def learn(self, frame, grid, pos, t, obs=None):
         if self.frames >= 8 or t - self.last_t < 2:
             return
@@ -444,11 +461,13 @@ class PieceReader:
         # 先放把握最大的，數量超過上限就改用次佳
         cand.sort(key=lambda it: -it[1][0][1])
         used = {}
+        tot = 0.0
         for (nr, nc), ranked in cand:
             for pc, sc in ranked:
                 if used.get(pc, 0) < self.LIMIT[pc.upper()] and sc >= 0.35 and square_ok(pc, nr, nc):
                     b[nr][nc] = pc
                     used[pc] = used.get(pc, 0) + 1
+                    tot += sc
                     break
             else:
                 return None
@@ -460,7 +479,65 @@ class PieceReader:
             return None
         if not position_sane(pos):
             return None
+        self.last_score = tot / max(1, len(cand))
         return pos
+
+
+def save_template_sets(path, readers):
+    d = {'n': np.array(len(readers))}
+    for i, rd in enumerate(readers):
+        ks = list(rd.sum.keys())
+        d['k%d' % i] = np.array(ks)
+        d['s%d' % i] = np.stack([rd.sum[k] for k in ks]).astype(np.float32)
+        d['c%d' % i] = np.array([rd.cnt[k] for k in ks])
+    try:
+        tmp = path + '.tmp.npz'
+        np.savez_compressed(tmp, **d)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def load_template_sets(path):
+    out = []
+    try:
+        d = np.load(path)
+        for i in range(int(d['n'])):
+            rd = PieceReader()
+            for k, m, c in zip(d['k%d' % i], d['s%d' % i], d['c%d' % i]):
+                if m.shape != (PieceReader.SZ + 2 * PieceReader.PAD,) * 2:
+                    break
+                rd.sum[str(k)] = m.astype(np.float32)
+                rd.cnt[str(k)] = int(c)
+            rd.frames = 1
+            if rd.ready() and len(rd.sum) >= 14:
+                out.append(rd)
+    except Exception:
+        pass
+    return out
+
+
+BUILTIN_TPL = 'piece_templates.npz'
+
+
+def template_library(lib_dir, limit=12):
+    """借用字樣：先用之前處理過的影片學到的，再加上程式內附的（從 GitHub 取得）。"""
+    readers = []
+    if lib_dir and os.path.isdir(lib_dir):
+        fs = sorted(glob.glob(os.path.join(lib_dir, '*.npz')), key=os.path.getmtime, reverse=True)
+        for f in fs[:limit]:
+            readers += load_template_sets(f)
+    bp = os.path.join(BASE_DIR, BUILTIN_TPL)
+    if not os.path.exists(bp):
+        try:
+            import urllib.request
+            urllib.request.urlretrieve(
+                'https://raw.githubusercontent.com/labr999/chess/main/xiangqi-video-scan/' + BUILTIN_TPL, bp)
+        except Exception:
+            pass
+    if os.path.exists(bp):
+        readers += load_template_sets(bp)
+    return readers
 
 
 def position_sane(pos, turn_known=False):
@@ -581,6 +658,108 @@ def find_start_grid(frame):
         return None
     mode, flip, thr, mr, mbk = pick  # flip=True：紅方在上
     return Grid(x0, ytop, sx, sy, flip, thr, mode, mr, mbk)
+
+
+def _lattice_step(vals, r):
+    """一群同列（或同行）棋子的座標差，找最大且大部分差值都是整數倍的格距。"""
+    ds = [d for d in vals if d > 1.5 * r]
+    if len(ds) < 4:
+        return None
+    ds = np.array(ds)
+    best = None
+    for st in np.arange(1.7 * r, 3.4 * r, 0.25):
+        k = np.round(ds / st)
+        err = np.abs(ds - k * st)
+        frac = float(np.mean(err < 0.12 * st))
+        if frac >= 0.7 and np.any(k == 1):
+            best = st
+    if best is None:
+        return None
+    k = np.round(ds / best)
+    ok = np.abs(ds - k * best) < 0.12 * best
+    return float(np.sum(ds[ok]) / np.sum(k[ok]))
+
+
+def find_mid_grid(frame, readers):
+    """影片一開始就是中局（沒有開局畫面）：用棋子排列推格點，再借別支影片學到的字樣認子。
+    回傳 (Grid, Position) 或 None。"""
+    if not readers:
+        return None
+    h = frame.shape[0]
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    cs = hough(gray, h / 60.0, h / 13.0, h / 40.0)
+    if len(cs) < 14:
+        return None
+    rmed = float(np.median([c[2] for c in cs]))
+    cs = [c for c in cs if 0.75 * rmed <= c[2] <= 1.3 * rmed]
+    cs = dedupe_circles(cs, 0.6 * rmed)
+    if len(cs) < 14:
+        return None
+    dx = [abs(a[0] - b[0]) for i, a in enumerate(cs) for b in cs[i + 1:] if abs(a[1] - b[1]) < 0.4 * rmed]
+    dy = [abs(a[1] - b[1]) for i, a in enumerate(cs) for b in cs[i + 1:] if abs(a[0] - b[0]) < 0.4 * rmed]
+    sx, sy = _lattice_step(dx, rmed), _lattice_step(dy, rmed)
+    if sx is None or sy is None or not (0.8 * sx <= sy <= 1.25 * sx) or not (0.3 * sx <= rmed <= 0.6 * sx):
+        return None
+    ref = min(cs, key=lambda c: c[0] + c[1])
+    xs = [ref[0] + ((c[0] - ref[0]) - sx * round((c[0] - ref[0]) / sx)) for c in cs]
+    ys = [ref[1] + ((c[1] - ref[1]) - sy * round((c[1] - ref[1]) / sy)) for c in cs]
+    xa, ya = float(np.median(xs)), float(np.median(ys))
+    keep = [c for c in cs if abs((c[0] - xa) / sx - round((c[0] - xa) / sx)) < 0.25
+            and abs((c[1] - ya) / sy - round((c[1] - ya) / sy)) < 0.25]
+    if len(keep) < 14:
+        return None
+    idx = [(int(round((c[0] - xa) / sx)), int(round((c[1] - ya) / sy))) for c in keep]
+    # 畫面上棋盤外也可能有圓（人臉、裝飾）：取能框住最多棋子的 9x10 範圍
+    win = max(((cx, ry) for cx, _ in idx for _, ry in idx),
+              key=lambda w: sum(1 for a, b in idx if w[0] <= a <= w[0] + 8 and w[1] <= b <= w[1] + 9))
+    keep = [c for c, (a, b) in zip(keep, idx) if win[0] <= a <= win[0] + 8 and win[1] <= b <= win[1] + 9]
+    idx = [(a, b) for a, b in idx if win[0] <= a <= win[0] + 8 and win[1] <= b <= win[1] + 9]
+    if len(keep) < 14:
+        return None
+    ci, ri = [a for a, _ in idx], [b for _, b in idx]
+    c0, c1, r0, r1 = min(ci), max(ci), min(ri), max(ri)
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    # 顏色：兩群分類（不知道哪些是紅子，取分得最開的特徵）
+    pick = None
+    for mode in ('frac', 'lab'):
+        v = np.array([color_feat(hsv, lab, *c, mode) for c in keep])
+        o = np.sort(v)
+        gaps = o[1:] - o[:-1]
+        lo_n = 4
+        if len(o) < 2 * lo_n:
+            continue
+        i = int(np.argmax(gaps[lo_n - 1:len(o) - lo_n])) + lo_n - 1
+        thr = (o[i] + o[i + 1]) / 2.0
+        red, blk = v[v >= thr], v[v < thr]
+        sd = (np.std(red) + np.std(blk)) / 2.0 + 1e-6
+        sep = (float(np.median(red)) - float(np.median(blk))) / sd
+        if pick is None or sep > pick[0]:
+            pick = (sep, mode, thr, float(np.median(red)), float(np.median(blk)))
+    if pick is None or pick[0] < 1.5:
+        return None
+    _, mode, thr, mr, mbk = pick
+    best = None
+    for oc in range(0, 9 - (c1 - c0)):
+        for orow in range(0, 10 - (r1 - r0)):
+            x0 = xa + (c0 - oc) * sx
+            y0 = ya + (r0 - orow) * sy
+            for flip in (False, True):
+                g = Grid(x0, y0, sx, sy, flip, thr, mode, mr, mbk)
+                obs = g.observe(frame)
+                n = sum(1 for row in obs for o in row if o != 'E')
+                if n < len(keep) - 2:
+                    continue
+                for rd in readers:
+                    pos = rd.read(frame, g, obs)
+                    if pos is None:
+                        continue
+                    sc = rd.last_score
+                    if best is None or sc > best[0]:
+                        best = (sc, g, pos, rd)
+    if best is None or best[0] < 0.5:
+        return None
+    return best[1], best[2], best[3]
 
 
 def mismatch(grid_a, obs):
@@ -848,7 +1027,7 @@ def judge(pos, engine, title, depth, margin):
 # 單支影片
 # ====================================================================
 
-def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video'):
+def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video', lib_dir=None):
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise RuntimeError('打不開影片')
@@ -865,6 +1044,7 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video'):
     stalls, last_ok, last_stall = [], 0.0, -999.0
     pend_read = None
     reader, prev_obs, stable = PieceReader(), None, 0
+    library, mid_pend, mid_last, from_start = None, None, -999.0, False
     while True:
         ok = cap.grab()
         if not ok:
@@ -882,7 +1062,27 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video'):
                         snap_times.pop(0)
                     snaps.append(debug_frame(frame, t))
                 grid = find_start_grid(frame)
-                if grid is not None:
+                if grid is None and t >= 15 and t - mid_last >= 2:
+                    # 沒看到開局畫面：試著從中局開始認（借用別支影片學到的字樣）
+                    mid_last = t
+                    if library is None:
+                        library = template_library(lib_dir)
+                    r = find_mid_grid(frame, library) if library else None
+                    key = r[1].fen() if r is not None else None
+                    if key is not None and key == mid_pend:
+                        g, pos, rd = r
+                        grid, tracker = g, Tracker(persist)
+                        tracker.reanchor(pos, t)
+                        last_ok = t
+                        reader = PieceReader()
+                        reader.sum = {k: v.copy() for k, v in rd.sum.items()}
+                        reader.cnt = dict(rd.cnt)
+                        reader.frames = 1  # 之後也從這支影片學字樣
+                        log('    沒有開局畫面，從中局開始認盤 @ %d:%02d（%s在上方；%s）' % (
+                            int(t) // 60, int(t) % 60, '紅方' if g.flip else '黑方', key.split()[0]))
+                    mid_pend = key
+                elif grid is not None:
+                    from_start = True
                     tracker = Tracker(persist)
                     last_ok = t
                     reader.learn(frame, grid, START, t, grid.observe(frame))
@@ -928,6 +1128,12 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video'):
                                                     time.time() - t0))
         idx += 1
     cap.release()
+    if from_start and lib_dir:
+        try:
+            os.makedirs(lib_dir, exist_ok=True)
+            reader.save(os.path.join(lib_dir, vid + '.npz'))
+        except OSError:
+            pass
     if grid is None and debug_dir:
         for k, img in enumerate(snaps, 1):
             imwrite_u(os.path.join(debug_dir, '%s_nostart_%d.jpg' % (vid, k)), img)
@@ -1073,6 +1279,62 @@ def _write_csv(path, rows):
             w.writerow(r)
 
 
+def read_csv_rows(path):
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding='utf-8-sig', newline='') as f:
+            return list(csv.DictReader(f))
+    except Exception:
+        return []
+
+
+def row_vid(r):
+    m = re.search(r'[?&]v=([\w-]{6,})', r.get('網址') or '')
+    return m.group(1) if m else None
+
+
+def engine_error_ids(path):
+    """總表中判定依據是「引擎錯誤」的影片（舊版引擎當掉），有引擎時要重跑。"""
+    return {row_vid(r) for r in read_csv_rows(path) if (r.get('判定依據') or '').startswith('引擎錯誤')} - {None}
+
+
+def replace_csv_rows(path, out_dir, vid, rows):
+    """重跑某支影片：刪掉總表裡它的舊列與舊棋譜檔，再寫入新結果。"""
+    if not rows:
+        return
+    old = read_csv_rows(path)
+    mine = [r for r in old if row_vid(r) == vid]
+    if not mine:
+        append_csv(path, rows)
+        return
+    keep_files = {r.get('棋譜檔') for r in rows}
+    for r in mine:
+        rel = r.get('棋譜檔') or ''
+        if rel and rel not in keep_files:
+            try:
+                os.remove(os.path.join(out_dir, rel))
+            except OSError:
+                pass
+    rest = [r for r in old if row_vid(r) != vid] + list(rows)
+    try:
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8-sig', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction='ignore')
+            w.writeheader()
+            for r in rest:
+                w.writerow(r)
+        os.replace(tmp, path)
+    except PermissionError:
+        try:
+            os.remove(path + '.tmp')
+        except OSError:
+            pass
+        alt = path[:-4] + '_' + time.strftime('%m%d_%H%M%S') + '.csv'
+        _write_csv(alt, rows)
+        log('    ⚠ 總表.csv 被 Excel 開著無法更新，這盤先寫到 %s（舊的那列請手動刪除）' % os.path.basename(alt))
+
+
 def migrate_layout(out_dir):
     """舊版把棋譜放在 結果\\開局\\；改成 先手開局/後手開局\\結果\\開局\\，並更新總表。"""
     csv_path = os.path.join(out_dir, '總表.csv')
@@ -1116,7 +1378,8 @@ def migrate_layout(out_dir):
 def process(video, path, out_dir, engine, args):
     dbg = os.path.join(out_dir, '_debug')
     os.makedirs(dbg, exist_ok=True)
-    grid, tracker = scan_video(path, args.step, args.persist, dbg, video['id'])
+    grid, tracker = scan_video(path, args.step, args.persist, dbg, video['id'],
+                               os.path.join(out_dir, '_templates'))
     rows = []
     if grid is None:
         log('    ✗ 找不到開局完整盤面，略過')
@@ -1245,15 +1508,21 @@ def main():
     except Exception as e:
         log('（舊棋譜搬資料夾失敗：%s）' % e)
     stats = {}
+    retry = engine_error_ids(csv_path) if engine else set()
+    if retry:
+        log('有 %d 支影片上次「引擎錯誤」，這次會重新判定' % len(retry))
     for i, v in enumerate(videos, 1):
-        if v['id'] in done and not args.redo and done[v['id']].get('status') == 'ok':
+        if (v['id'] in done and not args.redo and done[v['id']].get('status') == 'ok'
+                and v['id'] not in retry):
             log('[%d/%d] 已處理過，略過：%s' % (i, len(videos), v['title']))
             continue
         log('[%d/%d] %s' % (i, len(videos), v['title']))
         try:
             path = v.get('path') or download(v, args, args.cache)
             status, rows = process(v, path, args.out, engine, args)
-            append_csv(csv_path, rows)
+            if any((r.get('判定依據') or '').startswith('引擎錯誤') for r in rows):
+                status = 'engine_error'  # 下次自動重跑
+            replace_csv_rows(csv_path, args.out, v['id'], rows)
             if not v.get('path') and not args.keep_video:
                 try:
                     os.remove(path)
