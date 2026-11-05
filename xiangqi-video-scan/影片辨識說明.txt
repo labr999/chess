@@ -45,6 +45,7 @@
   --browser firefox  私人清單借用瀏覽器登入（Chrome 新版常讀不到，建議 Firefox）
   --margin 300     引擎判勝門檻；--depth 16 引擎深度；--no-engine 不用引擎
   --redo           已處理過的也重做
+  --start N        從清單第 N 支開始（中斷後接續用）；加 --redo 時程式也會直接問從第幾支開始
 
 檔案
   video_scan.py、xq_core.py、run_video_scan.bat、requirements_video.txt、playlists.json（清單選單，可自己編輯）

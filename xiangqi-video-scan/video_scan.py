@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.3.4'
+VERSION = '1.3.5'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -1455,6 +1455,7 @@ def main():
                     help='辨識完上傳到象棋小棋聖（預設 %s）' % XQS_DEFAULT)
     ap.add_argument('--no-upload', action='store_true')
     ap.add_argument('--redo', action='store_true', help='已處理過的也重做')
+    ap.add_argument('--start', type=int, default=0, help='從清單第 N 支開始（前面的略過）')
     args = ap.parse_args()
     if not args.url and not args.local:
         args.url = ask_url()
@@ -1499,8 +1500,18 @@ def main():
             args.browser = br
             title, videos = list_videos(args.url, args)
         log('「%s」共 %d 支影片' % (title, len(videos)))
+    if args.redo and not args.start and sys.stdin and sys.stdin.isatty():
+        a = input('要從第幾支開始重做？（1～%d，直接 Enter 從第 1 支）：' % len(videos)).strip()
+        if a.isdigit():
+            args.start = int(a)
+    start = max(1, args.start or 1)
+    if start > len(videos):
+        log('清單只有 %d 支，第 %d 支之後沒有影片' % (len(videos), start))
+        return
+    if start > 1:
+        log('從第 %d 支開始，前 %d 支略過' % (start, start - 1))
     if args.limit:
-        videos = videos[:args.limit]
+        videos = videos[:start - 1 + args.limit]
 
     csv_path = os.path.join(args.out, '總表.csv')
     try:
@@ -1512,6 +1523,8 @@ def main():
     if retry:
         log('有 %d 支影片上次「引擎錯誤」，這次會重新判定' % len(retry))
     for i, v in enumerate(videos, 1):
+        if i < start:
+            continue
         if (v['id'] in done and not args.redo and done[v['id']].get('status') == 'ok'
                 and v['id'] not in retry):
             log('[%d/%d] 已處理過，略過：%s' % (i, len(videos), v['title']))
