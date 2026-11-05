@@ -34,12 +34,13 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.2.4'
+VERSION = '1.3.0'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
 START_GRID = START.color_grid()
 
+SIDE_DIR = {'紅方': '先手開局', '黑方': '後手開局'}  # 依畫面下方（主播）執哪一方分
 RESULT_DIR = {'w': '先手勝(紅)', 'b': '後手勝(黑)', None: '未分勝負'}
 
 
@@ -248,6 +249,116 @@ class Grid:
         return obs
 
 
+class PieceReader:
+    """從影片本身學每種棋子的字樣（局面已確定時記下每格的字），
+    之後用來辨認老師用手擺出來的局面。"""
+
+    SZ = 24
+    LIMIT = {'K': 1, 'A': 2, 'B': 2, 'N': 2, 'R': 2, 'C': 2, 'P': 5}
+
+    def __init__(self):
+        self.sum = {}
+        self.cnt = {}
+        self.frames = 0
+        self.last_t = -999.0
+
+    def _ink(self, hsv, grid, vr, vc, red, ang=0):
+        x, y = grid.px(vr, vc)
+        r = int(grid.s * 0.36)
+        x, y = int(round(x)), int(round(y))
+        h, w = hsv.shape[:2]
+        if x - r < 0 or y - r < 0 or x + r >= w or y + r >= h:
+            return None
+        patch = hsv[y - r:y + r + 1, x - r:x + r + 1]
+        H, S, V = patch[..., 0], patch[..., 1], patch[..., 2]
+        redm = ((H <= 10) | (H >= 165)) & (S >= 90) & (V >= 60)
+        m = (redm if red else ((V <= 95) & ~redm)).astype(np.float32)
+        if ang:
+            M = cv2.getRotationMatrix2D((r, r), ang, 1.0)
+            m = cv2.warpAffine(m, M, (2 * r + 1, 2 * r + 1))
+        m = cv2.resize(m, (self.SZ, self.SZ), interpolation=cv2.INTER_AREA)
+        m = cv2.GaussianBlur(m, (3, 3), 0)
+        m = m - m.mean()
+        n = float(np.linalg.norm(m))
+        return m / n if n > 1e-6 else None
+
+    def ready(self):
+        return self.frames >= 2 and len(self.sum) >= 12
+
+    def learn(self, frame, grid, pos, t):
+        if self.frames >= 8 or t - self.last_t < 4:
+            return
+        self.last_t = t
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        for vr in range(10):
+            for vc in range(9):
+                nr, nc = grid.to_norm(vr, vc)
+                pc = pos.b[nr][nc]
+                if pc is None:
+                    continue
+                m = self._ink(hsv, grid, vr, vc, pc.isupper())
+                if m is None:
+                    continue
+                self.sum[pc] = self.sum.get(pc, 0) + m
+                self.cnt[pc] = self.cnt.get(pc, 0) + 1
+        self.frames += 1
+
+    def read(self, frame, grid, obs):
+        """回傳 Position（輪走方先設紅）或 None（認不出合理局面）。"""
+        if not self.ready():
+            return None
+        tpl = {}
+        for pc, m in self.sum.items():
+            v = m / self.cnt[pc]
+            v = v - v.mean()
+            n = float(np.linalg.norm(v))
+            if n > 1e-6:
+                tpl[pc] = v / n
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        b = [[None] * 9 for _ in range(10)]
+        cand = []
+        for vr in range(10):
+            for vc in range(9):
+                nr, nc = grid.to_norm(vr, vc)
+                o = obs[nr][nc]
+                if o == 'E':
+                    continue
+                red = o == 'R'
+                scores = {}
+                for ang in (0, -15, 15, 180):
+                    m = self._ink(hsv, grid, vr, vc, red, ang)
+                    if m is None:
+                        continue
+                    for pc, v in tpl.items():
+                        if pc.isupper() != red:
+                            continue
+                        sc = float((m * v).sum())
+                        if sc > scores.get(pc, -9):
+                            scores[pc] = sc
+                if not scores:
+                    return None
+                ranked = sorted(scores.items(), key=lambda kv: -kv[1])
+                cand.append(((nr, nc), ranked))
+        # 先放把握最大的，數量超過上限就改用次佳
+        cand.sort(key=lambda it: -it[1][0][1])
+        used = {}
+        for (nr, nc), ranked in cand:
+            for pc, sc in ranked:
+                if used.get(pc, 0) < self.LIMIT[pc.upper()] and sc >= 0.35:
+                    b[nr][nc] = pc
+                    used[pc] = used.get(pc, 0) + 1
+                    break
+            else:
+                return None
+        if used.get('K') != 1 or used.get('k') != 1:
+            return None
+        pos = Position(b, 'w')
+        rk, bk = pos.find_king('w'), pos.find_king('b')
+        if not (rk and bk and 7 <= rk[0] <= 9 and 3 <= rk[1] <= 5 and 0 <= bk[0] <= 2 and 3 <= bk[1] <= 5):
+            return None
+        return pos
+
+
 def _uniform_run(xs, n=9, tol=0.22):
     """在排序好的 x 座標中找出 n 個等距點，回傳 (起點, 間距) 或 None。"""
     xs = sorted(xs)
@@ -386,12 +497,26 @@ class Tracker:
         self.persist = persist
         self.takebacks = 0
         self.nodes = 1
+        self.segments = []      # 老師擺出中局後重新開始的段落（各自的根節點）
+        self.setups = set()     # 擺局根節點：還不知道輪誰走
+
+    def reanchor(self, pos, t):
+        root = Node(pos, t=t)
+        self.segments.append(root)
+        self.setups.add(id(root))
+        self.cur = root
+        self.pending = None
+        self.nodes += 1
 
     def _succ(self, node):
         out = []
-        for mv in node.pos.legal_moves():
-            q = node.pos.make(mv)
-            out.append((mv, q, q.color_grid()))
+        turns = 'wb' if (id(node) in self.setups and not node.children) else node.pos.turn
+        for tn in turns:
+            p = node.pos.copy()
+            p.turn = tn
+            for mv in p.legal_moves():
+                q = p.make(mv)
+                out.append((mv, q, q.color_grid()))
         return out
 
     def feed(self, obs, t):
@@ -438,6 +563,11 @@ class Tracker:
             self.cur = val
             self.takebacks += 1
             return
+        if id(self.cur) in self.setups and not self.cur.children:
+            (r1, c1) = val[0][0]
+            pc = self.cur.pos.b[r1][c1]
+            if pc is not None:
+                self.cur.pos.turn = 'w' if pc.isupper() else 'b'
         for mv in val:
             node = next((ch for ch in self.cur.children if ch.move == mv), None)
             if node is None:
@@ -476,7 +606,7 @@ def pgn_moves(start_node, start_ply=0):
             force = len(node.children) > 1
             node, ply = main, ply + 1
 
-    walk(start_node, start_ply, False)
+    walk(start_node, start_ply, start_ply % 2 == 1)
     return ' '.join(out)
 
 
@@ -489,14 +619,18 @@ class Engine:
         pats = ['Pikafish-Windows*.exe', 'pikafish*.exe'] if sys.platform == 'win32' else ['pikafish*']
         path = None
         for p in pats:
-            hits = [h for h in sorted(glob.glob(os.path.join(ENGINE_DIR, p))) if not h.endswith('.nnue')]
+            hits = [h for h in sorted(glob.glob(os.path.join(ENGINE_DIR, p)) +
+                                      glob.glob(os.path.join(ENGINE_DIR, '**', p), recursive=True) +
+                                      glob.glob(os.path.join(BASE_DIR, 'engine*', '**', p), recursive=True))
+                    if not h.endswith('.nnue')]
             if hits:
                 path = hits[0]
                 break
         if not path:
-            raise RuntimeError('engine 資料夾找不到 Pikafish')
+            raise RuntimeError('%s 裡找不到 Pikafish*.exe' % ENGINE_DIR)
+        self.dir = os.path.dirname(path)
         flags = 0x08000000 if sys.platform == 'win32' else 0  # 不跳出黑視窗
-        self.p = subprocess.Popen([path], cwd=ENGINE_DIR, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        self.p = subprocess.Popen([path], cwd=self.dir, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL, text=True, bufsize=1, creationflags=flags)
         self._send('uci')
         self._wait('uciok')
@@ -584,6 +718,7 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video'):
     snap_times = sorted(set([5, 15, 30, 60] + ([dur * k / 6 for k in range(1, 6)] if dur else [])))
     snaps = []
     stalls, last_ok, last_stall = [], 0.0, -999.0
+    reader, prev_obs, stable = PieceReader(), None, 0
     while True:
         ok = cap.grab()
         if not ok:
@@ -615,10 +750,22 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video'):
                         imwrite_u(os.path.join(debug_dir, vid + '_grid.jpg'), dbg)
             else:
                 obs = grid.observe(frame)
+                stable = stable + 1 if obs == prev_obs else 0
+                prev_obs = obs
                 n0 = tracker.nodes
                 tracker.feed(obs, t)
-                if tracker.nodes != n0 or mismatch(tracker.cur.grid, obs) <= 2:
+                dnow = mismatch(tracker.cur.grid, obs)
+                if dnow == 0 and stable >= 2:
+                    reader.learn(frame, grid, tracker.cur.pos, t)
+                if tracker.nodes != n0 or dnow <= 2:
                     last_ok = t
+                elif t - last_ok > 6 and stable >= 6 and dnow >= 5:
+                    pos = reader.read(frame, grid, obs)
+                    if pos is not None:
+                        tracker.reanchor(pos, t)
+                        last_ok = t
+                        log('    老師擺出新局面 @ %d:%02d，重新認盤（%s）' % (int(t) // 60, int(t) % 60,
+                                                                 pos.fen().split()[0]))
                 elif debug_dir and len(stalls) < 3 and t - last_ok > 40 and t - last_stall > 60:
                     last_stall = t
                     stalls.append(t)
@@ -646,21 +793,28 @@ def safe_name(s, n=40):
     return s[:n] or 'untitled'
 
 
-def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv_rows):
+def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv_rows, setup=None):
     line = [branch_root] + main_line(branch_root)
     cn = [n.cn for n in line]
-    family, detail = classify_opening(cn)
+    if setup is None:
+        family, detail = classify_opening(cn)
+    else:
+        family, detail = '擺局', '中局擺子'
     final = line[-1].pos
     win, reason = judge(final, engine, video.get('title'), args.depth, args.margin)
     res_tag = {'w': '1-0', 'b': '0-1', None: '*'}[win]
-    sub = os.path.join(out_dir, RESULT_DIR[win], safe_name(detail))
+    host = '黑方' if grid.flip else '紅方'
+    sub = os.path.join(out_dir, SIDE_DIR[host], RESULT_DIR[win], safe_name(detail))
     os.makedirs(sub, exist_ok=True)
     fname = '%s_%s%s.pgn' % (safe_name(video.get('title'), 30), video['id'], ('_%d' % gi) if gi else '')
     fpath = os.path.join(sub, fname)
     # 這條分支（含其中的變化）
-    fake = Node(START)
-    fake.children = [branch_root]
-    moves = pgn_moves(fake)
+    if setup is None:
+        fake = Node(START)
+        fake.children = [branch_root]
+        moves = pgn_moves(fake)
+    else:
+        moves = pgn_moves(setup, 0 if setup.pos.turn == 'w' else 1)
     host = '黑方' if grid.flip else '紅方'
     with open(fpath, 'w', encoding='utf-8') as f:
         f.write('[Game "Chinese Chess"]\n')
@@ -668,6 +822,8 @@ def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv
         f.write('[Site "%s"]\n' % video.get('url', ''))
         f.write('[Result "%s"]\n' % res_tag)
         f.write('[Opening "%s"]\n' % detail)
+        if setup is not None:
+            f.write('[SetUp "1"]\n[FEN "%s"]\n' % setup.pos.fen())
         f.write('[Annotator "video_scan %s"]\n' % VERSION)
         f.write('[Format "Chinese"]\n')
         f.write('{勝方判定：%s；畫面下方（主播）執%s；退回示範 %d 次}\n' % (reason, host, tracker.takebacks))
@@ -679,7 +835,9 @@ def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv
         '小棋聖ID': '',
     })
     log('    → %s｜%s｜%d 步｜%s' % (RESULT_DIR[win], detail, len(cn), reason))
-    if args.upload and len(cn) >= 2:
+    if setup is not None and args.upload:
+        log('    （擺局段落只存本機棋譜，不上傳小棋聖）')
+    if args.upload and len(cn) >= 2 and setup is None:
         red, black = parse_players(video.get('title'))
         t0 = int(line[0].t)
         yt = str(video.get('url', '')).startswith('http')
@@ -763,6 +921,46 @@ def _write_csv(path, rows):
             w.writerow(r)
 
 
+def migrate_layout(out_dir):
+    """舊版把棋譜放在 結果\\開局\\；改成 先手開局/後手開局\\結果\\開局\\，並更新總表。"""
+    csv_path = os.path.join(out_dir, '總表.csv')
+    if not os.path.exists(csv_path):
+        return
+    with open(csv_path, encoding='utf-8-sig', newline='') as f:
+        rows = list(csv.DictReader(f))
+    moved = 0
+    for r in rows:
+        rel = r.get('棋譜檔') or ''
+        parts = re.split(r'[\\/]', rel)
+        if not parts or parts[0] not in RESULT_DIR.values():
+            continue
+        side = SIDE_DIR.get(r.get('主播執'), '先手開局')
+        new_rel = os.path.join(side, *parts)
+        src, dst = os.path.join(out_dir, *parts), os.path.join(out_dir, new_rel)
+        if os.path.exists(src):
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            os.replace(src, dst)
+        r['棋譜檔'] = new_rel
+        moved += 1
+    if not moved:
+        return
+    try:
+        with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction='ignore')
+            w.writeheader()
+            for r in rows:
+                w.writerow(r)
+    except PermissionError:
+        log('⚠ 總表.csv 被 Excel 開著，棋譜已搬到新資料夾但總表路徑沒更新')
+    for d in RESULT_DIR.values():
+        for root, dirs, files in os.walk(os.path.join(out_dir, d), topdown=False):
+            try:
+                os.rmdir(root)
+            except OSError:
+                pass
+    log('已把 %d 盤舊棋譜改放到「先手開局／後手開局」資料夾' % moved)
+
+
 def process(video, path, out_dir, engine, args):
     dbg = os.path.join(out_dir, '_debug')
     os.makedirs(dbg, exist_ok=True)
@@ -772,11 +970,18 @@ def process(video, path, out_dir, engine, args):
         log('    ✗ 找不到開局完整盤面，略過')
         return 'no_start', rows
     branches = [ch for ch in tracker.root.children if len(main_line(ch)) + 1 >= args.min_moves]
-    if not branches:
+    segs = [sg for sg in tracker.segments
+            if sg.children and len(main_line(sg.children[0])) + 1 >= args.min_moves]
+    if not branches and not segs:
         log('    ✗ 辨識到的步數太少（%d 個局面），略過' % tracker.nodes)
         return 'too_short', rows
-    for gi, br in enumerate(branches):
+    gi = 0
+    for br in branches:
         write_game(out_dir, video, gi, br, grid, tracker, engine, args, rows)
+        gi += 1
+    for sg in segs:
+        write_game(out_dir, video, gi, sg.children[0], grid, tracker, engine, args, rows, setup=sg)
+        gi += 1
     return 'ok', rows
 
 
@@ -855,7 +1060,7 @@ def main():
     if not args.no_engine:
         try:
             engine = Engine()
-            log('Pikafish 已啟動，用來判斷終局勝負')
+            log('Pikafish 已啟動（%s），用來判斷終局勝負' % engine.dir)
         except Exception as e:
             log('（Pikafish 未啟動：%s；勝負只看絕殺與標題）' % e)
 
@@ -883,6 +1088,10 @@ def main():
         videos = videos[:args.limit]
 
     csv_path = os.path.join(args.out, '總表.csv')
+    try:
+        migrate_layout(args.out)
+    except Exception as e:
+        log('（舊棋譜搬資料夾失敗：%s）' % e)
     stats = {}
     for i, v in enumerate(videos, 1):
         if v['id'] in done and not args.redo and done[v['id']].get('status') == 'ok':
