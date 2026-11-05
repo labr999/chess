@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.2'
+VERSION = '1.2.1'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -128,6 +128,31 @@ def norm_frame(f):
         s = 720.0 / h
         f = cv2.resize(f, (int(round(w * s)), 720), interpolation=cv2.INTER_AREA)
     return f
+
+
+def imwrite_u(path, img):
+    """cv2.imwrite 在 Windows 遇到中文路徑會靜靜失敗，改用 imencode + tofile。"""
+    try:
+        ok, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if ok:
+            buf.tofile(path)
+            return True
+    except Exception as e:
+        log('    （存截圖失敗：%s）' % e)
+    return False
+
+
+def debug_frame(frame, t):
+    """找不到開局時留一張畫面：畫出偵測到的圓，左上角寫時間與圓數。"""
+    h = frame.shape[0]
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    cs = hough(gray, h / 60.0, h / 13.0, h / 40.0)
+    img = frame.copy()
+    for (x, y, r) in cs:
+        cv2.circle(img, (int(x), int(y)), int(r), (0, 255, 0), 2)
+    cv2.putText(img, '%d:%02d  circles=%d' % (int(t) // 60, int(t) % 60, len(cs)), (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+    return img
 
 
 def hough(gray, rmin, rmax, mindist, p2=0.8):
@@ -501,6 +526,9 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video'):
     grid, tracker = None, None
     idx = 0
     t0 = time.time()
+    dur = total / fps if total else 0
+    snap_times = sorted(set([5, 15, 30, 60] + ([dur * k / 6 for k in range(1, 6)] if dur else [])))
+    snaps = []
     while True:
         ok = cap.grab()
         if not ok:
@@ -513,6 +541,10 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video'):
             frame = norm_frame(frame)
             t = idx / fps
             if grid is None:
+                if debug_dir and snap_times and t >= snap_times[0]:
+                    while snap_times and t >= snap_times[0]:
+                        snap_times.pop(0)
+                    snaps.append(debug_frame(frame, t))
                 grid = find_start_grid(frame)
                 if grid is not None:
                     tracker = Tracker(persist)
@@ -524,7 +556,7 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video'):
                             for vc in range(9):
                                 x, y = grid.px(vr, vc)
                                 cv2.circle(dbg, (int(x), int(y)), 4, (0, 255, 0), -1)
-                        cv2.imwrite(os.path.join(debug_dir, vid + '_grid.jpg'), dbg)
+                        imwrite_u(os.path.join(debug_dir, vid + '_grid.jpg'), dbg)
             else:
                 tracker.feed(grid.observe(frame), t)
             if idx % int(fps * 60) == 0 and total:
@@ -532,6 +564,11 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video'):
                                                     time.time() - t0))
         idx += 1
     cap.release()
+    if grid is None and debug_dir:
+        for k, img in enumerate(snaps, 1):
+            imwrite_u(os.path.join(debug_dir, '%s_nostart_%d.jpg' % (vid, k)), img)
+        if snaps:
+            log('    已存 %d 張畫面到 _debug（%s_nostart_*.jpg）' % (len(snaps), vid))
     return grid, tracker
 
 
@@ -772,7 +809,7 @@ def main():
     csv_path = os.path.join(args.out, '總表.csv')
     stats = {}
     for i, v in enumerate(videos, 1):
-        if v['id'] in done and not args.redo:
+        if v['id'] in done and not args.redo and done[v['id']].get('status') == 'ok':
             log('[%d/%d] 已處理過，略過：%s' % (i, len(videos), v['title']))
             continue
         log('[%d/%d] %s' % (i, len(videos), v['title']))
