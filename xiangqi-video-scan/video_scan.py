@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.3.0'
+VERSION = '1.3.1'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -203,11 +203,61 @@ def color_frac(hsv, x, y, r):
     return red / (red + dark + 1.0)
 
 
+def color_lab(lab, x, y, r):
+    """字的顏色偏紅程度：字（較暗像素）的 Lab a* 減去棋子底色的 a*。
+    紅字明顯為正，黑字接近 0；不靠飽和度，暗紅字、褪色畫面也分得開。"""
+    r = max(4, int(r * 0.62))
+    x, y = int(round(x)), int(round(y))
+    h, w = lab.shape[:2]
+    x0, x1, y0, y1 = max(0, x - r), min(w, x + r + 1), max(0, y - r), min(h, y + r + 1)
+    patch = lab[y0:y1, x0:x1]
+    if patch.size == 0:
+        return 0.0
+    yy, xx = np.ogrid[y0 - y:y1 - y, x0 - x:x1 - x]
+    m = (xx * xx + yy * yy) <= r * r
+    L, A = patch[..., 0][m].astype(np.float32), patch[..., 1][m].astype(np.float32)
+    med = float(np.median(L))
+    ink = L < med - 25
+    if ink.sum() < 5:
+        ink = L < np.percentile(L, 20)
+    if ink.all() or not ink.any():
+        return 0.0
+    return float(A[ink].mean() - A[~ink].mean())
+
+
+def color_feat(frame_hsv, frame_lab, x, y, r, mode):
+    if mode == 'lab':
+        return color_lab(frame_lab, x, y, r)
+    return color_frac(frame_hsv, x, y, r)
+
+
+def pick_color_mode(hsv, lab, top, bot):
+    """開局時上下兩半各 16 子顏色已知：選分得最開的特徵，回傳 (mode, flip, thr) 或 None。"""
+    best = None
+    for mode in ('frac', 'lab'):
+        ft = [color_feat(hsv, lab, *c, mode) for c in top]
+        fb = [color_feat(hsv, lab, *c, mode) for c in bot]
+        mt, mb = float(np.median(ft)), float(np.median(fb))
+        flip = mt > mb
+        red, blk = (ft, fb) if flip else (fb, ft)
+        sd = (np.std(red) + np.std(blk)) / 2.0 + 1e-6
+        sep = abs(mt - mb) / sd
+        lo, hi = float(np.percentile(red, 10)), float(np.percentile(blk, 90))
+        thr = (lo + hi) / 2.0 if lo > hi else (mt + mb) / 2.0
+        mr, mbk = float(np.median(red)), float(np.median(blk))
+        if best is None or sep > best[0]:
+            best = (sep, mode, flip, thr, mr, mbk)
+    if best[0] < 1.5:
+        return None
+    return best[1:]
+
+
 class Grid:
     """影片畫面上的 9x10 格點。vr/vc 是畫面座標，flip=True 表示紅方在畫面上方。"""
 
-    def __init__(self, x0, y0, sx, sy, flip, thr):
+    def __init__(self, x0, y0, sx, sy, flip, thr, mode='frac', mr=None, mb=None):
         self.x0, self.y0, self.sx, self.sy, self.flip, self.thr = x0, y0, sx, sy, flip, thr
+        self.mode, self.mr, self.mb = mode, mr, mb
         self.s = (sx + sy) / 2.0
 
     def px(self, vr, vc):
@@ -217,7 +267,7 @@ class Grid:
         return (9 - vr, 8 - vc) if self.flip else (vr, vc)
 
     def to_json(self):
-        return dict(x0=self.x0, y0=self.y0, sx=self.sx, sy=self.sy, flip=self.flip, thr=self.thr)
+        return dict(x0=self.x0, y0=self.y0, sx=self.sx, sy=self.sy, flip=self.flip, thr=self.thr, mode=self.mode)
 
     def observe(self, frame):
         """回傳 10x9（標準方向，紅方在下）的 'E'/'R'/'B'。"""
@@ -227,6 +277,7 @@ class Grid:
         roi = frame[y_lo:y_hi, x_lo:x_hi]
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB) if self.mode == 'lab' else None
         circles = hough(gray, s * 0.30, s * 0.58, s * 0.62)
         obs = [['E'] * 9 for _ in range(10)]
         best = {}
@@ -242,10 +293,23 @@ class Grid:
                 continue
             if (vr, vc) not in best or d < best[(vr, vc)][0]:
                 best[(vr, vc)] = (d, x, y, r)
-        for (vr, vc), (_, x, y, r) in best.items():
-            f = color_frac(hsv, x, y, r)
+        feats = {k: color_feat(hsv, lab, x, y, r, self.mode) for k, (_, x, y, r) in best.items()}
+        thr = self.thr
+        if self.mr is not None and len(feats) >= 8:
+            # 畫面亮度、壓縮會讓顏色整體偏移：以開局學到的紅/黑中心做兩群分類，跟著這張畫面調整門檻
+            mr, mb = self.mr, self.mb
+            vals = np.array(list(feats.values()))
+            for _ in range(5):
+                t2 = (mr + mb) / 2.0
+                rv, bv = vals[vals >= t2], vals[vals < t2]
+                if len(rv) == 0 or len(bv) == 0:
+                    break
+                mr, mb = float(np.median(rv)), float(np.median(bv))
+            if mr - mb >= 0.5 * (self.mr - self.mb):
+                thr = (mr + mb) / 2.0
+        for (vr, vc), f in feats.items():
             nr, nc = self.to_norm(vr, vc)
-            obs[nr][nc] = 'R' if f >= self.thr else 'B'
+            obs[nr][nc] = 'R' if f >= thr else 'B'
         return obs
 
 
@@ -270,9 +334,11 @@ class PieceReader:
         if x - r < 0 or y - r < 0 or x + r >= w or y + r >= h:
             return None
         patch = hsv[y - r:y + r + 1, x - r:x + r + 1]
-        H, S, V = patch[..., 0], patch[..., 1], patch[..., 2]
-        redm = ((H <= 10) | (H >= 165)) & (S >= 90) & (V >= 60)
-        m = (redm if red else ((V <= 95) & ~redm)).astype(np.float32)
+        V = patch[..., 2].astype(np.float32)
+        yy, xx = np.ogrid[-r:r + 1, -r:r + 1]
+        disk = (xx * xx + yy * yy) <= (r * r)
+        med = float(np.median(V[disk]))
+        m = ((V < med - 35) & disk).astype(np.float32)
         if ang:
             M = cv2.getRotationMatrix2D((r, r), ang, 1.0)
             m = cv2.warpAffine(m, M, (2 * r + 1, 2 * r + 1))
@@ -283,10 +349,10 @@ class PieceReader:
         return m / n if n > 1e-6 else None
 
     def ready(self):
-        return self.frames >= 2 and len(self.sum) >= 12
+        return self.frames >= 1 and len(self.sum) >= 12
 
-    def learn(self, frame, grid, pos, t):
-        if self.frames >= 8 or t - self.last_t < 4:
+    def learn(self, frame, grid, pos, t, obs=None):
+        if self.frames >= 8 or t - self.last_t < 2:
             return
         self.last_t = t
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -295,6 +361,8 @@ class PieceReader:
                 nr, nc = grid.to_norm(vr, vc)
                 pc = pos.b[nr][nc]
                 if pc is None:
+                    continue
+                if obs is not None and obs[nr][nc] != ('R' if pc.isupper() else 'B'):
                     continue
                 m = self._ink(hsv, grid, vr, vc, pc.isupper())
                 if m is None:
@@ -456,14 +524,14 @@ def find_start_grid(frame):
     extra = sum(1 for k in occ if START_GRID[k[0]][k[1]] == 'E')
     if hit < 29 or extra > 3:
         return None
-    top = [color_frac(hsv, *occ[k]) for k in occ if k[0] <= 4]
-    bot = [color_frac(hsv, *occ[k]) for k in occ if k[0] >= 5]
-    mt, mb = float(np.median(top)), float(np.median(bot))
-    if abs(mt - mb) < 0.15:
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    top = [occ[k] for k in occ if k[0] <= 4 and START_GRID[k[0]][k[1]] != 'E']
+    bot = [occ[k] for k in occ if k[0] >= 5 and START_GRID[k[0]][k[1]] != 'E']
+    pick = pick_color_mode(hsv, lab, top, bot)
+    if pick is None:
         return None
-    flip = mt > mb  # 紅方在上
-    thr = (mt + mb) / 2.0
-    return Grid(x0, ytop, sx, sy, flip, thr)
+    mode, flip, thr, mr, mbk = pick  # flip=True：紅方在上
+    return Grid(x0, ytop, sx, sy, flip, thr, mode, mr, mbk)
 
 
 def mismatch(grid_a, obs):
@@ -739,8 +807,9 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video'):
                 if grid is not None:
                     tracker = Tracker(persist)
                     last_ok = t
-                    log('    找到開局盤面 @ %d:%02d（%s在上方）' % (int(t) // 60, int(t) % 60,
-                                                       '紅方' if grid.flip else '黑方'))
+                    reader.learn(frame, grid, START, t, grid.observe(frame))
+                    log('    找到開局盤面 @ %d:%02d（%s在上方，顏色判斷 %s）' % (int(t) // 60, int(t) % 60,
+                                                       '紅方' if grid.flip else '黑方', grid.mode))
                     if debug_dir:
                         dbg = frame.copy()
                         for vr in range(10):
@@ -771,6 +840,7 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video'):
                     stalls.append(t)
                     imwrite_u(os.path.join(debug_dir, '%s_stall_%d.jpg' % (vid, len(stalls))),
                               stall_frame(frame, grid, obs, tracker, t))
+                    imwrite_u(os.path.join(debug_dir, '%s_stall_%d_raw.jpg' % (vid, len(stalls))), frame)
             if idx % int(fps * 60) == 0 and total:
                 log('    %d%%（已辨識 %d 個局面，%.0f 秒）' % (100 * idx // total, tracker.nodes if tracker else 0,
                                                     time.time() - t0))
