@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.2.2'
+VERSION = '1.2.3'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -152,6 +152,27 @@ def debug_frame(frame, t):
         cv2.circle(img, (int(x), int(y)), int(r), (0, 255, 0), 2)
     cv2.putText(img, '%d:%02d  circles=%d' % (int(t) // 60, int(t) % 60, len(cs)), (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+    return img
+
+
+def stall_frame(frame, grid, obs, tracker, t):
+    """追蹤卡住時的畫面：每格畫出程式看到的（紅點=紅子、藍點=黑子），
+    黃圈標出和目前局面不同的格子。"""
+    img = frame.copy()
+    exp = tracker.cur.grid
+    for vr in range(10):
+        for vc in range(9):
+            nr, nc = grid.to_norm(vr, vc)
+            x, y = grid.px(vr, vc)
+            o = obs[nr][nc]
+            if o == 'R':
+                cv2.circle(img, (int(x), int(y)), 6, (0, 0, 255), -1)
+            elif o == 'B':
+                cv2.circle(img, (int(x), int(y)), 6, (255, 0, 0), -1)
+            if o != exp[nr][nc]:
+                cv2.circle(img, (int(x), int(y)), int(grid.s * 0.45), (0, 255, 255), 2)
+    cv2.putText(img, '%d:%02d stuck  diff=%d  moves=%d' % (int(t) // 60, int(t) % 60, mismatch(exp, obs),
+                tracker.nodes - 1), (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
     return img
 
 
@@ -280,6 +301,24 @@ def find_start_grid(frame):
         run = _uniform_run([c[0] for c in row])
         if run:
             backs.append((float(np.mean([c[1] for c in row])), run))
+    if len(backs) == 1:
+        # 另一條底線少了一兩子（影片開頭已走過）：找格點對得上的最遠一列
+        yb, (bx0, bsx) = backs[0]
+        cand = None
+        for row in rows:
+            if len(row) < 6:
+                continue
+            ym = float(np.mean([c[1] for c in row]))
+            dy = abs(ym - yb)
+            if not (0.8 * bsx * 9 <= dy <= 1.25 * bsx * 9):
+                continue
+            al = sum(1 for c in row
+                     if abs((c[0] - bx0) / bsx - round((c[0] - bx0) / bsx)) < 0.25
+                     and 0 <= round((c[0] - bx0) / bsx) <= 8)
+            if al >= 6 and (cand is None or abs(dy - 9 * bsx) < cand[0]):
+                cand = (abs(dy - 9 * bsx), ym)
+        if cand is not None:
+            backs.append((cand[1], (bx0, bsx)))
     if len(backs) < 2:
         return None
     backs.sort()
@@ -544,6 +583,7 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video'):
     dur = total / fps if total else 0
     snap_times = sorted(set([5, 15, 30, 60] + ([dur * k / 6 for k in range(1, 6)] if dur else [])))
     snaps = []
+    stalls, last_ok, last_stall = [], 0.0, -999.0
     while True:
         ok = cap.grab()
         if not ok:
@@ -563,6 +603,7 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video'):
                 grid = find_start_grid(frame)
                 if grid is not None:
                     tracker = Tracker(persist)
+                    last_ok = t
                     log('    找到開局盤面 @ %d:%02d（%s在上方）' % (int(t) // 60, int(t) % 60,
                                                        '紅方' if grid.flip else '黑方'))
                     if debug_dir:
@@ -573,7 +614,16 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video'):
                                 cv2.circle(dbg, (int(x), int(y)), 4, (0, 255, 0), -1)
                         imwrite_u(os.path.join(debug_dir, vid + '_grid.jpg'), dbg)
             else:
-                tracker.feed(grid.observe(frame), t)
+                obs = grid.observe(frame)
+                n0 = tracker.nodes
+                tracker.feed(obs, t)
+                if tracker.nodes != n0 or mismatch(tracker.cur.grid, obs) <= 2:
+                    last_ok = t
+                elif debug_dir and len(stalls) < 3 and t - last_ok > 40 and t - last_stall > 60:
+                    last_stall = t
+                    stalls.append(t)
+                    imwrite_u(os.path.join(debug_dir, '%s_stall_%d.jpg' % (vid, len(stalls))),
+                              stall_frame(frame, grid, obs, tracker, t))
             if idx % int(fps * 60) == 0 and total:
                 log('    %d%%（已辨識 %d 個局面，%.0f 秒）' % (100 * idx // total, tracker.nodes if tracker else 0,
                                                     time.time() - t0))
