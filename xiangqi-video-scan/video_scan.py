@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.3.2'
+VERSION = '1.3.3'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -281,6 +281,7 @@ class Grid:
         circles = hough(gray, s * 0.30, s * 0.58, s * 0.62)
         obs = [['E'] * 9 for _ in range(10)]
         best = {}
+        self.centers = {}
         for (x, y, r) in circles:
             gx, gy = x + x_lo, y + y_lo
             vc = int(round((gx - self.x0) / self.sx))
@@ -310,6 +311,8 @@ class Grid:
         for (vr, vc), f in feats.items():
             nr, nc = self.to_norm(vr, vc)
             obs[nr][nc] = 'R' if f >= thr else 'B'
+            _, x, y, r = best[(vr, vc)]
+            self.centers[(nr, nc)] = (x + x_lo, y + y_lo, r)
         return obs
 
 
@@ -341,7 +344,8 @@ class PieceReader:
     """從影片本身學每種棋子的字樣（局面已確定時記下每格的字），
     之後用來辨認老師用手擺出來的局面。"""
 
-    SZ = 24
+    SZ = 24      # 比對用字樣大小
+    PAD = 3      # 擷取時四周多留幾格，容許實體棋子沒擺正中
     LIMIT = {'K': 1, 'A': 2, 'B': 2, 'N': 2, 'R': 2, 'C': 2, 'P': 5}
 
     def __init__(self):
@@ -351,8 +355,14 @@ class PieceReader:
         self.last_t = -999.0
 
     def _ink(self, hsv, grid, vr, vc, red, ang=0):
-        x, y = grid.px(vr, vc)
-        r = int(grid.s * 0.36)
+        nr, nc = grid.to_norm(vr, vc)
+        c = getattr(grid, 'centers', {}).get((nr, nc))
+        if c is not None:
+            x, y, cr = c  # 用偵測到的棋子圓心與半徑（實體棋子常偏離格點）
+            r = int(cr * 0.80 * (self.SZ + 2 * self.PAD) / self.SZ)
+        else:
+            x, y = grid.px(vr, vc)
+            r = int(grid.s * 0.36 * (self.SZ + 2 * self.PAD) / self.SZ)
         x, y = int(round(x)), int(round(y))
         h, w = hsv.shape[:2]
         if x - r < 0 or y - r < 0 or x + r >= w or y + r >= h:
@@ -366,11 +376,10 @@ class PieceReader:
         if ang:
             M = cv2.getRotationMatrix2D((r, r), ang, 1.0)
             m = cv2.warpAffine(m, M, (2 * r + 1, 2 * r + 1))
-        m = cv2.resize(m, (self.SZ, self.SZ), interpolation=cv2.INTER_AREA)
+        full = self.SZ + 2 * self.PAD
+        m = cv2.resize(m, (full, full), interpolation=cv2.INTER_AREA)
         m = cv2.GaussianBlur(m, (3, 3), 0)
-        m = m - m.mean()
-        n = float(np.linalg.norm(m))
-        return m / n if n > 1e-6 else None
+        return m if float(m.sum()) > 1e-3 else None
 
     def ready(self):
         return self.frames >= 1 and len(self.sum) >= 12
@@ -400,12 +409,11 @@ class PieceReader:
         if not self.ready():
             return None
         tpl = {}
+        P, S = self.PAD, self.SZ
         for pc, m in self.sum.items():
-            v = m / self.cnt[pc]
-            v = v - v.mean()
-            n = float(np.linalg.norm(v))
-            if n > 1e-6:
-                tpl[pc] = v / n
+            v = (m / self.cnt[pc])[P:P + S, P:P + S].astype(np.float32)
+            if float(v.std()) > 1e-6:
+                tpl[pc] = v
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         b = [[None] * 9 for _ in range(10)]
         cand = []
@@ -421,10 +429,12 @@ class PieceReader:
                     m = self._ink(hsv, grid, vr, vc, red, ang)
                     if m is None:
                         continue
+                    m = m.astype(np.float32)
                     for pc, v in tpl.items():
                         if pc.isupper() != red:
                             continue
-                        sc = float((m * v).sum())
+                        # 在 ±PAD 範圍內找最佳對位
+                        sc = float(cv2.matchTemplate(m, v, cv2.TM_CCOEFF_NORMED).max())
                         if sc > scores.get(pc, -9):
                             scores[pc] = sc
                 if not scores:
