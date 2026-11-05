@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.2.1'
+VERSION = '1.2.2'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -241,6 +241,18 @@ def _uniform_run(xs, n=9, tol=0.22):
     return None
 
 
+def dedupe_circles(cs, d):
+    """同一顆棋子常被偵測成內外兩圈；圓心距離小於 d 的只留一個（半徑取中間值）。"""
+    out = []
+    for c in sorted(cs, key=lambda c: -c[2]):
+        for i, o in enumerate(out):
+            if (c[0] - o[0]) ** 2 + (c[1] - o[1]) ** 2 < d * d:
+                break
+        else:
+            out.append(c)
+    return out
+
+
 def find_start_grid(frame):
     """在畫面中找開局完整盤面；找到回傳 Grid，否則 None。"""
     h = frame.shape[0]
@@ -250,6 +262,9 @@ def find_start_grid(frame):
         return None
     rmed = float(np.median([c[2] for c in cs]))
     cs = [c for c in cs if 0.7 * rmed <= c[2] <= 1.35 * rmed]
+    cs = dedupe_circles(cs, 0.6 * rmed)
+    if len(cs) < 28:
+        return None
     # 依 y 分列
     cs.sort(key=lambda c: c[1])
     rows, cur = [], [cs[0]]
@@ -289,7 +304,7 @@ def find_start_grid(frame):
     need = [(r, c) for r in range(10) for c in range(9) if START_GRID[r][c] != 'E']
     hit = sum(1 for k in need if k in occ)
     extra = sum(1 for k in occ if START_GRID[k[0]][k[1]] == 'E')
-    if hit < 30 or extra > 2:
+    if hit < 29 or extra > 3:
         return None
     top = [color_frac(hsv, *occ[k]) for k in occ if k[0] <= 4]
     bot = [color_frac(hsv, *occ[k]) for k in occ if k[0] >= 5]
@@ -678,6 +693,17 @@ CSV_FIELDS = ['結果', '開局大類', '開局', '主線步數', '判定依據'
 
 
 def append_csv(path, rows):
+    if not rows:
+        return
+    try:
+        _write_csv(path, rows)
+    except PermissionError:
+        alt = path[:-4] + '_' + time.strftime('%m%d_%H%M%S') + '.csv'
+        _write_csv(alt, rows)
+        log('    ⚠ 總表.csv 被 Excel 開著無法寫入，這盤先寫到 %s（請關掉 Excel，之後的盤就會寫回總表）' % os.path.basename(alt))
+
+
+def _write_csv(path, rows):
     new = not os.path.exists(path)
     with open(path, 'a', encoding='utf-8-sig' if new else 'utf-8', newline='') as f:
         w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
