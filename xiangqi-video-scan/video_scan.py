@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.3.1'
+VERSION = '1.3.2'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -313,6 +313,30 @@ class Grid:
         return obs
 
 
+_A_SQ = {(9, 3), (9, 5), (8, 4), (7, 3), (7, 5)}
+_B_SQ = {(9, 2), (9, 6), (7, 0), (7, 4), (7, 8), (5, 2), (5, 6)}
+
+
+def square_ok(pc, r, c):
+    """棋子能不能出現在這格（標準化座標：紅方在下，第 9 列是紅方底線）。"""
+    u = pc.upper()
+    if pc.islower():
+        r = 9 - r  # 黑子翻到紅方視角檢查
+    if u == 'K':
+        return 7 <= r <= 9 and 3 <= c <= 5
+    if u == 'A':
+        return (r, c) in _A_SQ
+    if u == 'B':
+        return (r, c) in _B_SQ
+    if u == 'P':
+        if r >= 7:
+            return False
+        if r >= 5:
+            return c % 2 == 0
+        return True
+    return True
+
+
 class PieceReader:
     """從影片本身學每種棋子的字樣（局面已確定時記下每格的字），
     之後用來辨認老師用手擺出來的局面。"""
@@ -412,7 +436,7 @@ class PieceReader:
         used = {}
         for (nr, nc), ranked in cand:
             for pc, sc in ranked:
-                if used.get(pc, 0) < self.LIMIT[pc.upper()] and sc >= 0.35:
+                if used.get(pc, 0) < self.LIMIT[pc.upper()] and sc >= 0.35 and square_ok(pc, nr, nc):
                     b[nr][nc] = pc
                     used[pc] = used.get(pc, 0) + 1
                     break
@@ -424,7 +448,22 @@ class PieceReader:
         rk, bk = pos.find_king('w'), pos.find_king('b')
         if not (rk and bk and 7 <= rk[0] <= 9 and 3 <= rk[1] <= 5 and 0 <= bk[0] <= 2 and 3 <= bk[1] <= 5):
             return None
+        if not position_sane(pos):
+            return None
         return pos
+
+
+def position_sane(pos, turn_known=False):
+    """將帥不能照面；輪走方不能可以直接吃掉對方的將（否則局面不合法，引擎會當掉）。"""
+    try:
+        rc, bc = pos.in_check('w'), pos.in_check('b')
+    except Exception:
+        return False
+    if rc and bc:
+        return False  # 將帥照面或雙方同時被將
+    if turn_known:
+        return not (bc if pos.turn == 'w' else rc)
+    return True
 
 
 def _uniform_run(xs, n=9, tol=0.22):
@@ -697,8 +736,12 @@ class Engine:
         if not path:
             raise RuntimeError('%s 裡找不到 Pikafish*.exe' % ENGINE_DIR)
         self.dir = os.path.dirname(path)
+        self.path = path
+        self._start()
+
+    def _start(self):
         flags = 0x08000000 if sys.platform == 'win32' else 0  # 不跳出黑視窗
-        self.p = subprocess.Popen([path], cwd=self.dir, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        self.p = subprocess.Popen([self.path], cwd=self.dir, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL, text=True, bufsize=1, creationflags=flags)
         self._send('uci')
         self._wait('uciok')
@@ -718,14 +761,34 @@ class Engine:
                 return line
 
     def eval(self, fen, depth=16):
-        """回傳走棋方視角分數（centipawn），將死以 ±30000 表示。"""
+        """回傳走棋方視角分數（centipawn），將死以 ±30000 表示。引擎當掉會自動重開再試一次。"""
+        try:
+            return self._eval(fen, depth)
+        except (OSError, ValueError, RuntimeError):
+            self._kill()
+            self._start()
+            return self._eval(fen, depth)
+
+    def _kill(self):
+        for f in (self.p.stdin, self.p.stdout):
+            try:
+                f.close()
+            except Exception:
+                pass
+        try:
+            self.p.kill()
+            self.p.wait(timeout=5)
+        except Exception:
+            pass
+
+    def _eval(self, fen, depth):
         self._send('position fen ' + fen)
         self._send('go depth %d' % depth)
         score = 0
         while True:
             line = self.p.stdout.readline()
             if not line:
-                break
+                raise RuntimeError('Pikafish 結束了')
             m = re.search(r'score (cp|mate) (-?\d+)', line)
             if m and ' pv ' in line:
                 v = int(m.group(2))
@@ -737,14 +800,18 @@ class Engine:
     def close(self):
         try:
             self._send('quit')
+            self.p.wait(timeout=3)
         except Exception:
             pass
+        self._kill()
 
 
 TITLE_HINT = [(r'红胜|紅勝|红方胜|紅方勝|先手胜|先手勝', 'w'), (r'黑胜|黑勝|黑方胜|黑方勝|后手胜|後手勝', 'b')]
 
 
 def judge(pos, engine, title, depth, margin):
+    if not position_sane(pos, turn_known=True):
+        return None, '終局局面不合法（辨識有誤）'
     if not pos.legal_moves():
         win = 'b' if pos.turn == 'w' else 'w'
         return win, '絕殺/困斃（%s無棋可走）' % ('紅方' if pos.turn == 'w' else '黑方')
@@ -786,6 +853,7 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video'):
     snap_times = sorted(set([5, 15, 30, 60] + ([dur * k / 6 for k in range(1, 6)] if dur else [])))
     snaps = []
     stalls, last_ok, last_stall = [], 0.0, -999.0
+    pend_read = None
     reader, prev_obs, stable = PieceReader(), None, 0
     while True:
         ok = cap.grab()
@@ -830,7 +898,11 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video'):
                     last_ok = t
                 elif t - last_ok > 6 and stable >= 6 and dnow >= 5:
                     pos = reader.read(frame, grid, obs)
+                    key = pos.fen() if pos is not None else None
+                    if key is not None and key != pend_read:
+                        pend_read, pos = key, None  # 連續兩次認出同一局面才採用
                     if pos is not None:
+                        pend_read = None
                         tracker.reanchor(pos, t)
                         last_ok = t
                         log('    老師擺出新局面 @ %d:%02d，重新認盤（%s）' % (int(t) // 60, int(t) % 60,
@@ -1041,7 +1113,7 @@ def process(video, path, out_dir, engine, args):
         return 'no_start', rows
     branches = [ch for ch in tracker.root.children if len(main_line(ch)) + 1 >= args.min_moves]
     segs = [sg for sg in tracker.segments
-            if sg.children and len(main_line(sg.children[0])) + 1 >= args.min_moves]
+            if sg.children and len(main_line(sg.children[0])) + 1 >= max(args.min_moves, 8)]
     if not branches and not segs:
         log('    ✗ 辨識到的步數太少（%d 個局面），略過' % tracker.nodes)
         return 'too_short', rows
