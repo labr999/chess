@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.1'
+VERSION = '1.2'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -574,11 +574,70 @@ def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv
         '結果': RESULT_DIR[win], '開局大類': family, '開局': detail, '主線步數': len(cn),
         '判定依據': reason, '主播執': host, '標題': video.get('title'), '網址': video.get('url', ''),
         '前20步': ' '.join(cn[:20]), '終局FEN': final.fen(), '棋譜檔': os.path.relpath(fpath, out_dir),
+        '小棋聖ID': '',
     })
     log('    → %s｜%s｜%d 步｜%s' % (RESULT_DIR[win], detail, len(cn), reason))
+    if args.upload and len(cn) >= 2:
+        red, black = parse_players(video.get('title'))
+        t0 = int(line[0].t)
+        yt = str(video.get('url', '')).startswith('http')
+        url = ('https://www.youtube.com/watch?v=%s' % video['id']) if yt else ''
+        ud = video.get('upload_date') or ''
+        cn_up = [c.translate(str.maketrans('１２３４５６７８９', '123456789')) for c in cn]
+        payload = {
+            'red': red, 'black': black, 'result': WIN_TEXT[win],
+            'event': video.get('title') or video['id'],
+            'date': ('%s-%s-%s' % (ud[:4], ud[4:6], ud[6:8])) if len(ud) == 8 else '',
+            'year': int(ud[:4]) if len(ud) == 8 else None,
+            'opening': detail, 'tokens': cn_up, 'moves': cn_up,
+            'source': 'video-scan', 'format': 'video-scan %s' % VERSION,
+            'sourceUrl': url, 'detailUrl': ('%s&t=%ds' % (url, max(0, t0 - 3))) if yt else '',
+            'fen': final.fen(), 'validation': reason,
+            'rawExport': json.dumps({'videoId': video['id'], 'moveTimes': [round(n.t, 1) for n in line],
+                                     'game': gi, 'host': host, 'takebacks': tracker.takebacks}, ensure_ascii=False),
+        }
+        try:
+            gid, dup = upload_game(args.upload, payload)
+            csv_rows[-1]['小棋聖ID'] = gid
+            log('    ↑ 已上傳小棋聖（編號 %s%s）' % (gid, '，覆蓋舊的' if dup else ''))
+        except Exception as e:
+            log('    ✗ 上傳小棋聖失敗：%s（棋譜檔仍在本機，可之後重跑）' % e)
 
 
-CSV_FIELDS = ['結果', '開局大類', '開局', '主線步數', '判定依據', '主播執', '標題', '網址', '前20步', '終局FEN', '棋譜檔']
+XQS_DEFAULT = 'https://my-backend-api-1-e19n.onrender.com'
+WIN_TEXT = {'w': '紅勝', 'b': '黑勝', None: '未知'}
+
+
+def parse_players(title):
+    """標題若有「甲 對/vs/先負/勝 乙」就取出雙方名字，否則用影片紅方／影片黑方。"""
+    bad = set('炮砲马馬车車兵卒象相仕士帅帥将將中局开開布式变變')
+    for m in re.finditer(r'([\u4e00-\u9fff]{2,3})\s*(?:先负|先負|先胜|先勝|先和|对|對|vs\.?|VS|Vs|负|負|胜|勝)\s*([\u4e00-\u9fff]{2,3})', title or ''):
+        a, b = m.group(1), m.group(2)
+        if not (set(a) & bad or set(b) & bad):
+            return a, b
+    return '影片紅方', '影片黑方'
+
+
+def upload_game(base, payload, tries=3):
+    """POST 到小棋聖 /api/games。Render 免費機睡著時第一次要等約 1 分鐘喚醒。"""
+    import urllib.request
+    data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+    last = None
+    for k in range(tries):
+        try:
+            req = urllib.request.Request(base.rstrip('/') + '/api/games', data=data,
+                                         headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=120) as r:
+                d = json.loads(r.read().decode('utf-8'))
+                g = d.get('game') or {}
+                return g.get('id'), d.get('duplicate')
+        except Exception as e:
+            last = e
+            time.sleep(5 * (k + 1))
+    raise RuntimeError(last)
+
+
+CSV_FIELDS = ['結果', '開局大類', '開局', '主線步數', '判定依據', '主播執', '標題', '網址', '前20步', '終局FEN', '棋譜檔', '小棋聖ID']
 
 
 def append_csv(path, rows):
@@ -659,10 +718,21 @@ def main():
     ap.add_argument('--depth', type=int, default=16, help='終局引擎深度')
     ap.add_argument('--margin', type=int, default=300, help='引擎評分超過多少分判勝')
     ap.add_argument('--no-engine', action='store_true')
+    ap.add_argument('--upload', nargs='?', const=XQS_DEFAULT, default=None,
+                    help='辨識完上傳到象棋小棋聖（預設 %s）' % XQS_DEFAULT)
+    ap.add_argument('--no-upload', action='store_true')
     ap.add_argument('--redo', action='store_true', help='已處理過的也重做')
     args = ap.parse_args()
     if not args.url and not args.local:
         args.url = ask_url()
+        if not args.upload and not args.no_upload:
+            a = input('辨識完要自動上傳到「象棋小棋聖」棋譜倉庫嗎？(Y/n)：').strip().lower()
+            if a in ('', 'y', 'yes', '是'):
+                args.upload = XQS_DEFAULT
+    if args.no_upload:
+        args.upload = None
+    if args.upload:
+        log('辨識結果會上傳到：%s（第一次可能要等約 1 分鐘喚醒伺服器）' % args.upload)
     os.makedirs(args.out, exist_ok=True)
     os.makedirs(args.cache, exist_ok=True)
     done_path = os.path.join(args.out, '已處理.json')
