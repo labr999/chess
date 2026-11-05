@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.2.3'
+VERSION = '1.2.4'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -399,11 +399,11 @@ class Tracker:
         if d_cur <= 1:
             self.pending = None
             return
-        best = None  # (d, key, action)
+        best = (99, None, None)  # (d, key, action)；絕殺後沒有合法著法時 succ 為空
         succ = self._succ(self.cur)
         for mv, q, g in succ:
             d = mismatch(g, obs)
-            if best is None or d < best[0]:
+            if d < best[0]:
                 best = (d, ('m', mv), ('move', [mv]))
         anc, k = self.cur.parent, 0
         while anc is not None and k < 60:
@@ -902,7 +902,10 @@ def main():
             raise
         except Exception as e:
             status = 'error: %s' % e
-            log('    ✗ 錯誤：%s' % e)
+            import traceback
+            tb = traceback.extract_tb(e.__traceback__)
+            where = ('（%s 第 %d 行）' % (os.path.basename(tb[-1].filename), tb[-1].lineno)) if tb else ''
+            log('    ✗ 錯誤：%s%s' % (e, where))
         done[v['id']] = {'title': v['title'], 'status': status, 'time': time.strftime('%Y-%m-%d %H:%M')}
         json.dump(done, open(done_path, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
         stats[status.split(':')[0]] = stats.get(status.split(':')[0], 0) + 1
