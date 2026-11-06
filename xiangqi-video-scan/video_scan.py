@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.4.3'
+VERSION = '1.4.4'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -1624,9 +1624,17 @@ def sync_playlists(args, targets, done):
             log('  ✓ %s（%d 支）' % (title, len(videos)))
             ok += 1
         except Exception as e:
-            log('  ✗ %s：%s' % (name, e))
+            msg = str(e)
+            if 'private' in msg.lower() or '私人' in msg or 'does not exist' in msg.lower():
+                msg += '（私人清單：請改用 firefox 登入，或把清單改成「不公開」）'
+            log('  ✗ %s：%s' % (name, msg))
     log('\n已同步 %d / %d 個清單。到小棋聖「📺 我的清單」勾選要辨識的影片，'
         '再執行本程式選「Q」。' % (ok, len(targets)))
+
+
+COOKIE_HINT = ('  → Chrome／Edge 開著時讀不到登入資料（新版 Chrome 關掉也常讀不到）。建議：\n'
+               '     1. 用 Firefox 登入 YouTube 後，這裡輸入 firefox；或\n'
+               '     2. 把要用的 YouTube 清單改成「不公開」（知道網址的人才看得到），就不必借登入。')
 
 
 def ask_browser(args):
@@ -1914,6 +1922,9 @@ def main():
                     log('找到你的播放清單 %d 個' % len(targets))
                 except Exception as e:
                     log('讀不到「我的播放清單」（%s），改同步程式裡存的清單' % e)
+                    if 'cookie' in str(e).lower():
+                        log(COOKIE_HINT)
+                        args.browser = None  # 瀏覽器登入讀不到，改不借登入（公開／不公開清單仍讀得到）
             if targets:
                 presets = json.load(open(PRESET_FILE, encoding='utf-8')) if os.path.exists(PRESET_FILE) else []
                 have = {re.search(r'list=([\w-]+)', p['url']).group(1) for p in presets if 'list=' in p['url']}
