@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.4.4'
+VERSION = '1.4.5'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -1456,6 +1456,18 @@ def safe_name(s, n=40):
     return s[:n] or 'untitled'
 
 
+def title_class(pl_title):
+    """v1.4.5：依清單標題分類，例如「先手中砲對鴛鴦砲」→ ('先手開局', '中砲對鴛鴦砲')。
+    看不出先後手（如 重點棋譜、Favorites）回 (None, '')；只有「先手」「後手」兩字回 (目錄, '')。"""
+    t = re.sub(r'[（(]\s*\d+\s*部\s*[)）]', '', str(pl_title or '')).strip()
+    m = re.match(r'^\s*(先手|後手|后手)\s*[:：_\-－、 ]*(.*)$', t)
+    if not m:
+        return None, ''
+    side = '先手開局' if m.group(1) == '先手' else '後手開局'
+    name = re.sub(r'(專題)?清單$', '', m.group(2)).strip(' 　_-')
+    return side, name
+
+
 def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv_rows, setup=None):
     line = [branch_root] + main_line(branch_root)
     cn = [n.cn for n in line]
@@ -1467,7 +1479,12 @@ def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv
     win, reason = judge(final, engine, video.get('title'), args.depth, args.margin)
     res_tag = {'w': '1-0', 'b': '0-1', None: '*'}[win]
     host = '黑方' if grid.flip else '紅方'
-    sub = os.path.join(out_dir, SIDE_DIR[host], RESULT_DIR[win], safe_name(detail))
+    t_side, t_name = title_class(video.get('plTitle')) if setup is None else (None, '')
+    if t_side and t_name:
+        detail = t_name  # 依清單標題：先手開局\中砲對鴛鴦砲\結果\
+        sub = os.path.join(out_dir, t_side, safe_name(detail), RESULT_DIR[win])
+    else:
+        sub = os.path.join(out_dir, t_side or SIDE_DIR[host], RESULT_DIR[win], safe_name(detail))
     os.makedirs(sub, exist_ok=True)
     fname = '%s_%s%s.pgn' % (safe_name(video.get('title'), 30), video['id'], ('_%d' % gi) if gi else '')
     fpath = os.path.join(sub, fname)
@@ -1968,6 +1985,7 @@ def main():
     if queue_items is not None:
         videos = [{'id': q['videoId'], 'title': q.get('title') or q['videoId'],
                    'url': 'https://www.youtube.com/watch?v=' + q['videoId'], 'pl': q['playlistId'],
+                   'plTitle': q.get('playlistTitle') or '',
                    'queued': True} for q in queue_items]
         if args.limit:
             videos = videos[:args.limit]
@@ -1992,6 +2010,11 @@ def main():
             args.browser = br
             title, videos = list_videos(args.url, args)
         log('「%s」共 %d 支影片' % (title, len(videos)))
+        for v in videos:
+            v['plTitle'] = title
+        ts, tn = title_class(title)
+        if ts:
+            log('依清單標題分類：%s%s' % (ts, ('\\' + tn) if tn else '（開局依棋步判定）'))
         if args.upload:
             pl_key = playlist_key(args.url, title)
             try:
