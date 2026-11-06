@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title Xiangqi Video Scan v1.4.1
+title Xiangqi Video Scan v1.4.2
 cd /d "%~dp0"
 set PY=python
 where python >nul 2>nul || set PY=py

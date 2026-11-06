@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.4.1'
+VERSION = '1.4.2'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -1541,6 +1541,51 @@ def parse_players(title):
     return '影片紅方', '影片黑方'
 
 
+def _post_json(base, path, payload, tries=3, timeout=120):
+    import urllib.request
+    data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+    last = None
+    for k in range(tries):
+        try:
+            req = urllib.request.Request(base.rstrip('/') + path, data=data,
+                                         headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode('utf-8'))
+        except Exception as e:
+            last = e
+            time.sleep(5 * (k + 1))
+    raise RuntimeError(last)
+
+
+def playlist_key(url, title):
+    """清單編號：網址裡的 list=，沒有就用標題。"""
+    m = re.search(r'[?&]list=([\w-]+)', url or '')
+    return m.group(1) if m else (title or 'playlist')[:80]
+
+
+def upload_playlist(base, key, title, url, videos, done):
+    """把整份清單（標題、順序、每支上次的狀態）送到小棋聖「我的清單」。"""
+    items = []
+    for v in videos:
+        d = done.get(v['id']) or {}
+        items.append({'videoId': v['id'], 'title': v.get('title') or v['id'],
+                      'status': str(d.get('status') or '')[:40], 'time': d.get('time') or ''})
+    _post_json(base, '/api/playlists', {'id': key, 'title': title, 'url': url, 'items': items})
+
+
+def upload_video_status(base, key, video_id, status):
+    try:
+        _post_json(base, '/api/playlists/%s/status' % urllib_quote(key),
+                   {'videoId': video_id, 'status': str(status)[:40]}, tries=2, timeout=60)
+    except Exception as e:
+        log('    （清單狀態上傳失敗：%s）' % e)
+
+
+def urllib_quote(s):
+    import urllib.parse
+    return urllib.parse.quote(s, safe='')
+
+
 def upload_game(base, payload, tries=3):
     """POST 到小棋聖 /api/games。Render 免費機睡著時第一次要等約 1 分鐘喚醒。"""
     import urllib.request
@@ -1786,6 +1831,7 @@ def main():
         except Exception as e:
             log('（Pikafish 未啟動：%s；勝負只看絕殺與標題）' % e)
 
+    pl_key = None
     if args.local:
         files = [args.local] if os.path.isfile(args.local) else sorted(
             glob.glob(os.path.join(args.local, '*.mp4')) + glob.glob(os.path.join(args.local, '*.webm')) +
@@ -1806,6 +1852,14 @@ def main():
             args.browser = br
             title, videos = list_videos(args.url, args)
         log('「%s」共 %d 支影片' % (title, len(videos)))
+        if args.upload:
+            pl_key = playlist_key(args.url, title)
+            try:
+                upload_playlist(args.upload, pl_key, title, args.url, videos, done)
+                log('清單已同步到小棋聖「我的清單」：%s' % title)
+            except Exception as e:
+                pl_key = None
+                log('（清單上傳到小棋聖失敗：%s；棋譜照常上傳）' % e)
     if args.redo and not args.start and sys.stdin and sys.stdin.isatty():
         a = input('要從第幾支開始重做？（1～%d，直接 Enter 從第 1 支）：' % len(videos)).strip()
         if a.isdigit():
@@ -1856,6 +1910,8 @@ def main():
             where = ('（%s 第 %d 行）' % (os.path.basename(tb[-1].filename), tb[-1].lineno)) if tb else ''
             log('    ✗ 錯誤：%s%s' % (e, where))
         done[v['id']] = {'title': v['title'], 'status': status, 'time': time.strftime('%Y-%m-%d %H:%M')}
+        if args.upload and pl_key:
+            upload_video_status(args.upload, pl_key, v['id'], status)
         json.dump(done, open(done_path, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
         stats[status.split(':')[0]] = stats.get(status.split(':')[0], 0) + 1
     if engine:
