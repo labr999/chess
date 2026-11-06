@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.3.5'
+VERSION = '1.4.0'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -680,6 +680,146 @@ def _lattice_step(vals, r):
     return float(np.sum(ds[ok]) / np.sum(k[ok]))
 
 
+# ====================================================================
+# 整盤辨識模型（yolo12138/Chinese_Chess_Recognition，MIT 授權；見 board_model.py）
+# 用在：老師擺出新局面、Hough 漏子卡住、影片一開始就是中局。沒有 onnxruntime 時退回舊方法。
+# ====================================================================
+
+_BM = {'obj': None, 'tried': False}
+RAW_BASE = 'https://raw.githubusercontent.com/labr999/chess/main/xiangqi-video-scan/'
+
+
+def get_board_model():
+    if _BM['tried']:
+        return _BM['obj']
+    _BM['tried'] = True
+    try:
+        try:
+            import onnxruntime  # noqa: F401
+        except ImportError:
+            log('    安裝 onnxruntime（整盤辨識模型需要，只裝一次）…')
+            subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'onnxruntime'], check=False)
+            import onnxruntime  # noqa: F401
+        bp = os.path.join(BASE_DIR, 'board_model.py')
+        if not os.path.exists(bp):
+            import urllib.request
+            urllib.request.urlretrieve(RAW_BASE + 'board_model.py', bp)
+        if BASE_DIR not in sys.path:
+            sys.path.insert(0, BASE_DIR)
+        import board_model
+        _BM['obj'] = board_model.BoardModel(os.path.join(BASE_DIR, 'models'), log)
+        log('整盤辨識模型已載入（擺局、漏子、中局開始用）')
+    except Exception as e:
+        log('（整盤辨識模型無法使用：%s；改用舊方法）' % str(e)[:120])
+        _BM['obj'] = None
+    return _BM['obj']
+
+
+_LIMIT = {'K': 1, 'A': 2, 'B': 2, 'N': 2, 'R': 2, 'C': 2, 'P': 5}
+
+
+def model_read(bm, frame, max_hidden=0):
+    """整盤辨識，回傳 (Position, 四角, 遮擋格集合) 或 None。
+    遮擋格（手、身體，模型標 x）最多 max_hidden 格，視為未知；局面不合理時回傳 None。"""
+    try:
+        rows, conf, kp, ksc = bm.read(frame)
+    except Exception:
+        return None
+    b, cnt, hidden = [[None] * 9 for _ in range(10)], {}, set()
+    for r in range(10):
+        for c in range(9):
+            pc = rows[r][c]
+            if pc == '.':
+                continue
+            if pc == 'x':
+                hidden.add((r, c))
+                continue
+            if not square_ok(pc, r, c):
+                return None
+            cnt[pc] = cnt.get(pc, 0) + 1
+            if cnt[pc] > _LIMIT[pc.upper()]:
+                return None
+            b[r][c] = pc
+    if len(hidden) > max_hidden:
+        return None
+    pos = Position(b, 'w')
+    if not hidden:
+        if cnt.get('K') != 1 or cnt.get('k') != 1 or not position_sane(pos):
+            return None
+    return pos, kp, hidden
+
+
+def hough_conflict(pos, obs, hidden=()):
+    """Hough 看到棋子、但顏色跟模型不同或模型說是空格的格數（Hough 漏子不算）。"""
+    g = pos.color_grid()
+    return sum(1 for r in range(10) for c in range(9)
+               if obs[r][c] != 'E' and obs[r][c] != g[r][c] and (r, c) not in hidden)
+
+
+def grid_from_model(frame, pos, kp, hidden=None):
+    """由模型的棋盤四角定格點，再用偵測到的棋子圓心微調；回傳 Grid 或 None。"""
+    kp = np.asarray(kp, dtype=np.float64)
+    flip = (kp[0][1] + kp[1][1]) > (kp[2][1] + kp[3][1])  # 黑方底線在下 → 紅方在上
+    tl, tr, bl, br = (kp[3], kp[2], kp[1], kp[0]) if flip else (kp[0], kp[1], kp[2], kp[3])
+    x0, x1 = (tl[0] + bl[0]) / 2, (tr[0] + br[0]) / 2
+    y0, y1 = (tl[1] + tr[1]) / 2, (bl[1] + br[1]) / 2
+    sx, sy = (x1 - x0) / 8.0, (y1 - y0) / 9.0
+    if sx <= 5 or sy <= 5:
+        return None
+    occ = pos.color_grid()
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    s = (sx + sy) / 2
+    cs = hough(gray, s * 0.30, s * 0.58, s * 0.62)
+    for _ in range(3):
+        px, py = [], []
+        for (x, y, r) in cs:
+            vc, vr = int(round((x - x0) / sx)), int(round((y - y0) / sy))
+            if not (0 <= vr < 10 and 0 <= vc < 9):
+                continue
+            if abs(x - x0 - vc * sx) > 0.35 * sx or abs(y - y0 - vr * sy) > 0.35 * sy:
+                continue
+            nr, nc = (9 - vr, 8 - vc) if flip else (vr, vc)
+            if occ[nr][nc] == 'E':
+                continue
+            px.append((vc, x))
+            py.append((vr, y))
+        if len(px) < 8 or len(set(a for a, _ in px)) < 3 or len(set(a for a, _ in py)) < 3:
+            break
+        sx, x0 = np.polyfit([a for a, _ in px], [b for _, b in px], 1)
+        sy, y0 = np.polyfit([a for a, _ in py], [b for _, b in py], 1)
+    s = (sx + sy) / 2
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    best = None
+    for mode in ('frac', 'lab'):
+        red, blk = [], []
+        for vr in range(10):
+            for vc in range(9):
+                nr, nc = (9 - vr, 8 - vc) if flip else (vr, vc)
+                o = occ[nr][nc]
+                if o == 'E':
+                    continue
+                x, y = x0 + vc * sx, y0 + vr * sy
+                (red if o == 'R' else blk).append(color_feat(hsv, lab, int(x), int(y), int(s * 0.42), mode))
+        if len(red) < 2 or len(blk) < 2:
+            return None
+        mr, mb = float(np.median(red)), float(np.median(blk))
+        sep = (mr - mb) / ((np.std(red) + np.std(blk)) / 2 + 1e-6)
+        if best is None or sep > best[0]:
+            best = (sep, mode, mr, mb)
+    _, mode, mr, mb = best
+    if mr <= mb:
+        return None
+    g = Grid(float(x0), float(y0), float(sx), float(sy), bool(flip), (mr + mb) / 2.0, mode, mr, mb)
+    obs = g.observe(frame)
+    n_pc = sum(1 for row in occ for o in row if o != 'E')
+    miss = sum(1 for r in range(10) for c in range(9) if occ[r][c] != 'E' and obs[r][c] == 'E')
+    bad = sum(1 for r in range(10) for c in range(9) if obs[r][c] != 'E' and obs[r][c] != occ[r][c])
+    if bad > 3 or miss > 0.4 * n_pc:  # Hough 漏子不算錯；多出來或顏色錯才算
+        return None
+    return g
+
+
 def find_mid_grid(frame, readers):
     """影片一開始就是中局（沒有開局畫面）：用棋子排列推格點，再借別支影片學到的字樣認子。
     回傳 (Grid, Position) 或 None。"""
@@ -852,6 +992,39 @@ class Tracker:
                 self.pending = None
         else:
             self.pending = None
+
+    def match(self, pos, hidden=()):
+        """整盤模型讀到的局面跟目前棋局的關係：'same'、可接上的 action，或 None（新擺的局面）。
+        hidden 是被遮住的格子，比對時略過。"""
+        hid = set(hidden)
+
+        def eq(b):
+            for r in range(10):
+                for c in range(9):
+                    if b[r][c] != pos.b[r][c] and (r, c) not in hid:
+                        return False
+            return True
+        if eq(self.cur.pos.b):
+            return 'same'
+        succ = self._succ(self.cur)
+        hit = [mv for mv, q, g in succ if eq(q.b)]
+        if len(hit) == 1:
+            return ('move', hit)
+        if hit:
+            return 'ambiguous'  # 遮住的地方剛好分不出是哪一步
+        anc, k = self.cur.parent, 0
+        while anc is not None and k < 60:
+            if eq(anc.pos.b):
+                return ('back', anc)
+            anc, k = anc.parent, k + 1
+        hit = []
+        for mv, q, g in succ:
+            for mv2 in q.legal_moves():
+                if eq(q.make(mv2).b):
+                    hit.append([mv, mv2])
+        if len(hit) == 1:
+            return ('move', hit[0])
+        return 'ambiguous' if hit else None
 
     def _apply(self, action, t):
         kind, val = action
@@ -1027,7 +1200,7 @@ def judge(pos, engine, title, depth, margin):
 # 單支影片
 # ====================================================================
 
-def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video', lib_dir=None):
+def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video', lib_dir=None, use_model=True):
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise RuntimeError('打不開影片')
@@ -1045,6 +1218,8 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video', lib_dir=
     pend_read = None
     reader, prev_obs, stable = PieceReader(), None, 0
     library, mid_pend, mid_last, from_start = None, None, -999.0, False
+    bm = get_board_model() if use_model else None
+    model_last, model_fail = -999.0, True
     while True:
         ok = cap.grab()
         if not ok:
@@ -1065,9 +1240,17 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video', lib_dir=
                 if grid is None and t >= 15 and t - mid_last >= 2:
                     # 沒看到開局畫面：試著從中局開始認（借用別支影片學到的字樣）
                     mid_last = t
-                    if library is None:
-                        library = template_library(lib_dir)
-                    r = find_mid_grid(frame, library) if library else None
+                    r = None
+                    if bm is not None:
+                        mr_ = model_read(bm, frame)
+                        if mr_ is not None:
+                            g = grid_from_model(frame, mr_[0], mr_[1])
+                            if g is not None:
+                                r = (g, mr_[0], None)
+                    if r is None:
+                        if library is None:
+                            library = template_library(lib_dir)
+                        r = find_mid_grid(frame, library) if library else None
                     key = r[1].fen() if r is not None else None
                     if key is not None and key == mid_pend:
                         g, pos, rd = r
@@ -1075,9 +1258,10 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video', lib_dir=
                         tracker.reanchor(pos, t)
                         last_ok = t
                         reader = PieceReader()
-                        reader.sum = {k: v.copy() for k, v in rd.sum.items()}
-                        reader.cnt = dict(rd.cnt)
-                        reader.frames = 1  # 之後也從這支影片學字樣
+                        if rd is not None:
+                            reader.sum = {k: v.copy() for k, v in rd.sum.items()}
+                            reader.cnt = dict(rd.cnt)
+                            reader.frames = 1  # 之後也從這支影片學字樣
                         log('    沒有開局畫面，從中局開始認盤 @ %d:%02d（%s在上方；%s）' % (
                             int(t) // 60, int(t) % 60, '紅方' if g.flip else '黑方', key.split()[0]))
                     mid_pend = key
@@ -1106,18 +1290,42 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video', lib_dir=
                     reader.learn(frame, grid, tracker.cur.pos, t)
                 if tracker.nodes != n0 or dnow <= 2:
                     last_ok = t
-                elif t - last_ok > 6 and stable >= 6 and dnow >= 5:
-                    pos = reader.read(frame, grid, obs)
-                    key = pos.fen() if pos is not None else None
-                    if key is not None and key != pend_read:
-                        pend_read, pos = key, None  # 連續兩次認出同一局面才採用
-                    if pos is not None:
+                elif (t - last_ok > 2 and dnow >= 3) if bm is not None else (t - last_ok > 6 and stable >= 6 and dnow >= 5):
+                    # 有整盤辨識模型時不必等 Hough 穩定（模型自己會標出被手遮住的格子）
+                    pos, act, src = None, None, 'model'
+                    if bm is not None and t - model_last >= 1.0:
+                        model_last = t
+                        mr_ = model_read(bm, frame, max_hidden=8)
+                        model_fail = mr_ is None
+                        if mr_ is not None and hough_conflict(mr_[0], obs, mr_[2]) > 2:
+                            mr_, model_fail = None, True  # 跟畫面上偵測到的棋子對不上：不採用
+                        if mr_ is not None:
+                            pos = mr_[0]
+                            act = tracker.match(pos, mr_[2])
+                            if act is None and mr_[2]:
+                                act = 'wait'  # 有遮擋又接不上：等手移開再讀
+                    if pos is None and (bm is None or model_fail) and t - last_ok > 6 and stable >= 6 and dnow >= 5:
+                        pos, src = reader.read(frame, grid, obs), 'old'  # 舊方法（借字樣）當備援
+                        act = tracker.match(pos) if pos is not None else None
+                    if act == 'same':
                         pend_read = None
-                        tracker.reanchor(pos, t)
-                        last_ok = t
-                        log('    老師擺出新局面 @ %d:%02d，重新認盤（%s）' % (int(t) // 60, int(t) % 60,
-                                                                 pos.fen().split()[0]))
-                elif debug_dir and len(stalls) < 3 and t - last_ok > 40 and t - last_stall > 60:
+                        last_ok = t  # 只是 Hough 漏子，局面沒變
+                    elif pos is not None and (act is None or isinstance(act, tuple)):
+                        # 同一結果要連續讀到才採用：接上棋步 2 次；新擺局面 3 次（老師擺子途中的局面不算）
+                        key = pos.fen()
+                        need = 2 if (isinstance(act, tuple) or src == 'old') else 3
+                        pend_read = (key, pend_read[1] + 1) if pend_read and pend_read[0] == key else (key, 1)
+                        if pend_read[1] >= need:
+                            pend_read = None
+                            last_ok = t
+                            if isinstance(act, tuple):
+                                tracker._apply(act, t)
+                                log('    整盤辨識補上棋步 @ %d:%02d' % (int(t) // 60, int(t) % 60))
+                            else:
+                                tracker.reanchor(pos, t)
+                                log('    老師擺出新局面 @ %d:%02d，重新認盤（%s）' % (
+                                    int(t) // 60, int(t) % 60, key.split()[0]))
+                if debug_dir and len(stalls) < 3 and t - last_ok > 40 and t - last_stall > 60:
                     last_stall = t
                     stalls.append(t)
                     imwrite_u(os.path.join(debug_dir, '%s_stall_%d.jpg' % (vid, len(stalls))),
@@ -1379,7 +1587,7 @@ def process(video, path, out_dir, engine, args):
     dbg = os.path.join(out_dir, '_debug')
     os.makedirs(dbg, exist_ok=True)
     grid, tracker = scan_video(path, args.step, args.persist, dbg, video['id'],
-                               os.path.join(out_dir, '_templates'))
+                               os.path.join(out_dir, '_templates'), not getattr(args, 'no_model', False))
     rows = []
     if grid is None:
         log('    ✗ 找不到開局完整盤面，略過')
@@ -1455,6 +1663,7 @@ def main():
                     help='辨識完上傳到象棋小棋聖（預設 %s）' % XQS_DEFAULT)
     ap.add_argument('--no-upload', action='store_true')
     ap.add_argument('--redo', action='store_true', help='已處理過的也重做')
+    ap.add_argument('--no-model', action='store_true', help='不用整盤辨識模型（只用舊方法）')
     ap.add_argument('--start', type=int, default=0, help='從清單第 N 支開始（前面的略過）')
     args = ap.parse_args()
     if not args.url and not args.local:

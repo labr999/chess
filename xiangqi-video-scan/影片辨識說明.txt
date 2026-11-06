@@ -46,9 +46,19 @@
   --margin 300     引擎判勝門檻；--depth 16 引擎深度；--no-engine 不用引擎
   --redo           已處理過的也重做
   --start N        從清單第 N 支開始（中斷後接續用）；加 --redo 時程式也會直接問從第幾支開始
+  --no-model       不用整盤辨識模型，只用舊方法（Hough 圓形偵測＋字樣比對）
 
 檔案
-  video_scan.py、xq_core.py、run_video_scan.bat、requirements_video.txt、playlists.json（清單選單，可自己編輯）
+  video_scan.py、xq_core.py、board_model.py、run_video_scan.bat、requirements_video.txt、playlists.json（清單選單，可自己編輯）
+  models\（第一次執行時自動下載的整盤辨識模型，約 40 MB）
+
+整盤辨識模型（v1.4.0 起）
+  老師擺出新局面、Hough 漏子卡住、影片一開始就是中局時，改用整盤辨識模型一次讀 90 格，
+  再對回目前棋局：只是漏子就略過、差一兩步就補上棋步、完全不同才當新擺局面（連讀 3 次一致才採用）。
+  模型被手或身體遮住的格子會標成「看不到」，等手移開再讀。讀不到或不合理時自動退回舊方法。
+  第一次執行會自動 pip 安裝 onnxruntime，並從 Hugging Face 下載模型到 models\（核對 sha256）。
+  模型來源：yolo12138/Chinese_Chess_Recognition（作者 TheOne1006，MIT 授權），
+  https://huggingface.co/spaces/yolo12138/Chinese_Chess_Recognition
   （需要 engine\Pikafish-Windows-x86-64-universal.exe 與 pikafish.nnue，已在 engine 資料夾）
 
 上傳到「象棋小棋聖」
@@ -61,6 +71,8 @@
   總表.csv 多一欄「小棋聖ID」。
 
 更新紀錄
+  v1.4.0 加入整盤辨識模型（擺局、漏子、中局開始），舊方法保留為備援；--no-model 可關閉。
+  v1.3.5 加 --start N（從第 N 支開始）。
   v1.2  加入上傳到象棋小棋聖（POST /api/games），每步影片秒數一併存在 rawExport。
   v1.1  bat 改純英文（修正中文 bat 在 cmd 斷行亂掉、誤執行 winget）；deno 改用 pip 安裝；
         啟動時列出清單選單；貼到「所有播放清單」總覽頁會提示；私人清單讀不到時才問瀏覽器。

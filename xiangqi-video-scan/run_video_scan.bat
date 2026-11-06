@@ -1,12 +1,12 @@
 @echo off
 chcp 65001 >nul
-title Xiangqi Video Scan v1.3.5
+title Xiangqi Video Scan v1.4.0
 cd /d "%~dp0"
 set PY=python
 where python >nul 2>nul || set PY=py
 set SRC=https://raw.githubusercontent.com/labr999/chess/main/xiangqi-video-scan
 echo Getting latest program files from GitHub...
-for %%F in (video_scan.py xq_core.py requirements_video.txt) do (
+for %%F in (video_scan.py xq_core.py board_model.py requirements_video.txt) do (
   curl -fsSL -o "%%F.new" "%SRC%/%%F" && move /y "%%F.new" "%%F" >nul
   if exist "%%F.new" del "%%F.new"
 )
