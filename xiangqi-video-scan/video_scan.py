@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.4.2'
+VERSION = '1.4.3'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -1581,6 +1581,67 @@ def upload_video_status(base, key, video_id, status):
         log('    （清單狀態上傳失敗：%s）' % e)
 
 
+def _get_json(base, path, timeout=120, tries=3):
+    import urllib.request
+    last = None
+    for k in range(tries):
+        try:
+            with urllib.request.urlopen(base.rstrip('/') + path, timeout=timeout) as r:
+                return json.loads(r.read().decode('utf-8'))
+        except Exception as e:
+            last = e
+            time.sleep(5 * (k + 1))
+    raise RuntimeError(last)
+
+
+def list_my_playlists(args):
+    """借用瀏覽器登入，讀「我的所有播放清單」。回傳 [(標題, 網址)]。"""
+    import yt_dlp
+    with yt_dlp.YoutubeDL(_ydl_opts(args, {'extract_flat': True})) as y:
+        info = y.extract_info('https://www.youtube.com/feed/playlists', download=False)
+    out, seen = [], set()
+    for e in (info or {}).get('entries') or []:
+        if not e:
+            continue
+        lid = e.get('id') or ''
+        m = re.search(r'list=([\w-]+)', e.get('url') or '')
+        if m:
+            lid = m.group(1)
+        if not lid or lid in seen or lid in ('WL', 'LL'):
+            continue
+        seen.add(lid)
+        out.append((e.get('title') or lid, 'https://www.youtube.com/playlist?list=' + lid))
+    return out
+
+
+def sync_playlists(args, targets, done):
+    """只把清單（不辨識）同步到小棋聖「我的清單」。targets 是 [(名稱, 網址)]。"""
+    ok = 0
+    for name, url in targets:
+        try:
+            title, videos = list_videos(url, args)
+            upload_playlist(args.upload, playlist_key(url, title), title, url, videos, done)
+            log('  ✓ %s（%d 支）' % (title, len(videos)))
+            ok += 1
+        except Exception as e:
+            log('  ✗ %s：%s' % (name, e))
+    log('\n已同步 %d / %d 個清單。到小棋聖「📺 我的清單」勾選要辨識的影片，'
+        '再執行本程式選「Q」。' % (ok, len(targets)))
+
+
+def ask_browser(args):
+    if args.browser or args.cookies:
+        return True
+    if not (sys.stdin and sys.stdin.isatty()):
+        return False
+    br = input('讀你的播放清單要借用瀏覽器登入，輸入 chrome / edge / firefox（Enter 取消）：').strip().lower()
+    if not br:
+        return False
+    args.browser = br
+    log('（Chrome / Edge 讀不到時，請先把該瀏覽器全部關掉再試）')
+    return True
+
+
 def urllib_quote(s):
     import urllib.parse
     return urllib.parse.quote(s, safe='')
@@ -1766,7 +1827,11 @@ def ask_url():
         for i, p in enumerate(presets, 1):
             log('  %d. %s' % (i, p['name']))
         log('  或直接貼上播放清單／影片網址')
-        a = input('請輸入編號或網址：').strip().strip('"')
+        log('  S. 只同步清單到小棋聖（不辨識，之後在小棋聖勾選要辨識的影片）')
+        log('  Q. 辨識小棋聖「我的清單」裡勾選的影片（可分批）')
+        a = input('請輸入編號、網址、S 或 Q：').strip().strip('"')
+        if a.upper() in ('S', 'Q'):
+            return a.upper()
         if a.isdigit() and 1 <= int(a) <= len(presets):
             return presets[int(a) - 1]['url']
         if 'feed/playlists' in a:
@@ -1807,21 +1872,78 @@ def main():
     ap.add_argument('--redo', action='store_true', help='已處理過的也重做')
     ap.add_argument('--no-model', action='store_true', help='不用整盤辨識模型（只用舊方法）')
     ap.add_argument('--start', type=int, default=0, help='從清單第 N 支開始（前面的略過）')
+    ap.add_argument('--sync-only', action='store_true', help='只把清單同步到小棋聖，不辨識（不給網址＝我所有的播放清單）')
+    ap.add_argument('--queue', action='store_true', help='辨識小棋聖「我的清單」裡勾選的影片（--limit 控制這批幾支）')
     args = ap.parse_args()
-    if not args.url and not args.local:
+    interactive = not args.url and not args.local and not args.sync_only and not args.queue
+    if interactive:
         args.url = ask_url()
+        if args.url == 'S':
+            args.url, args.sync_only = None, True
+        elif args.url == 'Q':
+            args.url, args.queue = None, True
+    if (args.sync_only or args.queue) and not args.no_upload:
+        args.upload = args.upload or XQS_DEFAULT
+    if (args.sync_only or args.queue) and not args.upload:
+        log('只同步／勾選辨識都需要連到小棋聖，不能和 --no-upload 一起用')
+        return
+    if interactive and not args.sync_only and not args.queue:
         if not args.upload and not args.no_upload:
             a = input('辨識完要自動上傳到「象棋小棋聖」棋譜倉庫嗎？(Y/n)：').strip().lower()
             if a in ('', 'y', 'yes', '是'):
                 args.upload = XQS_DEFAULT
     if args.no_upload:
         args.upload = None
-    if args.upload:
+    if args.upload and not args.sync_only:
         log('辨識結果會上傳到：%s（第一次可能要等約 1 分鐘喚醒伺服器）' % args.upload)
     os.makedirs(args.out, exist_ok=True)
     os.makedirs(args.cache, exist_ok=True)
     done_path = os.path.join(args.out, '已處理.json')
     done = json.load(open(done_path, encoding='utf-8')) if os.path.exists(done_path) else {}
+
+    if args.sync_only:
+        if args.url:
+            targets = [('清單', args.url)]
+        else:
+            a = '' if not (sys.stdin and sys.stdin.isatty()) else input(
+                '同步哪些清單？Enter = 我所有的播放清單；或輸入 P = 只同步程式裡存的清單：').strip().upper()
+            targets = []
+            if a != 'P' and ask_browser(args):
+                try:
+                    targets = list_my_playlists(args)
+                    log('找到你的播放清單 %d 個' % len(targets))
+                except Exception as e:
+                    log('讀不到「我的播放清單」（%s），改同步程式裡存的清單' % e)
+            if targets:
+                presets = json.load(open(PRESET_FILE, encoding='utf-8')) if os.path.exists(PRESET_FILE) else []
+                have = {re.search(r'list=([\w-]+)', p['url']).group(1) for p in presets if 'list=' in p['url']}
+                new = [{'name': t, 'url': u} for t, u in targets if u.split('list=')[1] not in have]
+                if new:
+                    json.dump(presets + new, open(PRESET_FILE, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+                    log('（新增 %d 個清單到選單，下次可直接用編號選）' % len(new))
+            else:
+                if not os.path.exists(PRESET_FILE):
+                    json.dump(DEFAULT_PRESETS, open(PRESET_FILE, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+                targets = [(p['name'], p['url']) for p in json.load(open(PRESET_FILE, encoding='utf-8'))]
+        log('同步到小棋聖：%s（第一次可能要等約 1 分鐘喚醒伺服器）' % args.upload)
+        sync_playlists(args, targets, done)
+        return
+
+    queue_items = None
+    if args.queue:
+        try:
+            queue_items = _get_json(args.upload, '/api/queue').get('items') or []
+        except Exception as e:
+            log('讀不到小棋聖的勾選清單：%s' % e)
+            return
+        if not queue_items:
+            log('小棋聖「我的清單」目前沒有勾選要辨識的影片。先到小棋聖勾選，再執行一次。')
+            return
+        log('小棋聖勾選了 %d 支影片待辨識' % len(queue_items))
+        if not args.limit and sys.stdin and sys.stdin.isatty():
+            a = input('這一批要辨識幾支？（直接 Enter = 全部 %d 支）：' % len(queue_items)).strip()
+            if a.isdigit() and int(a) > 0:
+                args.limit = int(a)
 
     engine = None
     if not args.no_engine:
@@ -1832,7 +1954,14 @@ def main():
             log('（Pikafish 未啟動：%s；勝負只看絕殺與標題）' % e)
 
     pl_key = None
-    if args.local:
+    if queue_items is not None:
+        videos = [{'id': q['videoId'], 'title': q.get('title') or q['videoId'],
+                   'url': 'https://www.youtube.com/watch?v=' + q['videoId'], 'pl': q['playlistId'],
+                   'queued': True} for q in queue_items]
+        if args.limit:
+            videos = videos[:args.limit]
+            log('這一批辨識 %d 支（其餘留在勾選清單，下次再跑）' % len(videos))
+    elif args.local:
         files = [args.local] if os.path.isfile(args.local) else sorted(
             glob.glob(os.path.join(args.local, '*.mp4')) + glob.glob(os.path.join(args.local, '*.webm')) +
             glob.glob(os.path.join(args.local, '*.mkv')))
@@ -1888,6 +2017,8 @@ def main():
         if (v['id'] in done and not args.redo and done[v['id']].get('status') == 'ok'
                 and v['id'] not in retry):
             log('[%d/%d] 已處理過，略過：%s' % (i, len(videos), v['title']))
+            if v.get('queued') and args.upload:
+                upload_video_status(args.upload, v['pl'], v['id'], 'ok')  # 移出勾選清單
             continue
         log('[%d/%d] %s' % (i, len(videos), v['title']))
         try:
@@ -1910,8 +2041,8 @@ def main():
             where = ('（%s 第 %d 行）' % (os.path.basename(tb[-1].filename), tb[-1].lineno)) if tb else ''
             log('    ✗ 錯誤：%s%s' % (e, where))
         done[v['id']] = {'title': v['title'], 'status': status, 'time': time.strftime('%Y-%m-%d %H:%M')}
-        if args.upload and pl_key:
-            upload_video_status(args.upload, pl_key, v['id'], status)
+        if args.upload and (v.get('pl') or pl_key):
+            upload_video_status(args.upload, v.get('pl') or pl_key, v['id'], status)
         json.dump(done, open(done_path, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
         stats[status.split(':')[0]] = stats.get(status.split(':')[0], 0) + 1
     if engine:
