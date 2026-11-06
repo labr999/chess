@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.4.0'
+VERSION = '1.4.1'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -916,6 +916,87 @@ def mismatch(grid_a, obs):
 # 追蹤棋步（含老師退回去示範的變化）
 # ====================================================================
 
+
+MAX_GAP = 8           # 接續時最多補幾步（半步計）
+REACH_BUDGET = 2.0    # 每次搜尋最多幾秒
+
+
+def reach(start, target, hidden=(), setup=False, max_plies=MAX_GAP, budget=REACH_BUDGET):
+    """從 start 走最少步到 target（hidden 格不比對）。找不到回傳 None。
+    只動「跟目標不一樣」的格子上的棋子；每步最多修好 2 格，用來剪枝。"""
+    hid = set(hidden)
+    tb = target.b
+    t_end = time.time() + budget
+
+    def cnt(b):
+        d = {}
+        for row in b:
+            for p in row:
+                if p is not None:
+                    d[p] = d.get(p, 0) + 1
+        return d
+    if not hid:
+        cs, ct = cnt(start.b), cnt(tb)
+        if any(ct.get(p, 0) > n0 for p, n0 in ((p, cs.get(p, 0)) for p in ct)):
+            return None  # 目標多出棋子：不可能是走出來的
+
+    def diff(b):
+        n = 0
+        for r in range(10):
+            br, tr = b[r], tb[r]
+            for c in range(9):
+                if br[c] != tr[c] and (r, c) not in hid:
+                    n += 1
+        return n
+
+    class Out(Exception):
+        pass
+
+    def dfs(p, left, path):
+        if time.time() > t_end:
+            raise Out
+        d = diff(p.b)
+        if d == 0:
+            return list(path)
+        if left == 0 or (d + 1) // 2 > left:
+            return None
+        b = p.b
+        mvs = []
+        for mv in p.legal_moves():
+            (r1, c1), (r2, c2) = mv
+            if b[r1][c1] == tb[r1][c1] and (r1, c1) not in hid:
+                continue  # 這顆已經在對的位置
+            good = (tb[r2][c2] == b[r1][c1]) or (r2, c2) in hid
+            if not good and left == 1:
+                continue
+            mvs.append((0 if good else 1, mv))
+        mvs.sort(key=lambda x: x[0])
+        for _, mv in mvs:
+            path.append(mv)
+            r = dfs(p.make(mv), left - 1, path)
+            path.pop()
+            if r:
+                return r
+        return None
+
+    starts = [start]
+    if setup:
+        starts = []
+        for tn in 'wb':
+            q = start.copy()
+            q.turn = tn
+            starts.append(q)
+    try:
+        for depth in range(3, max_plies + 1):
+            for st in starts:
+                r = dfs(st, depth, [])
+                if r:
+                    return r
+    except Out:
+        return None
+    return None
+
+
 class Node:
     __slots__ = ('pos', 'grid', 'move', 'cn', 'parent', 'children', 't')
 
@@ -928,6 +1009,7 @@ class Node:
 class Tracker:
     def __init__(self, persist=2):
         self.root = Node(START)
+        self.all_nodes = [self.root]   # 所有走過的局面（主線、變化、擺局段落），倒回重講時用
         self.cur = self.root
         self.pending = None
         self.persist = persist
@@ -938,6 +1020,7 @@ class Tracker:
 
     def reanchor(self, pos, t):
         root = Node(pos, t=t)
+        self.all_nodes.append(root)
         self.segments.append(root)
         self.setups.add(id(root))
         self.cur = root
@@ -1012,11 +1095,15 @@ class Tracker:
             return ('move', hit)
         if hit:
             return 'ambiguous'  # 遮住的地方剛好分不出是哪一步
+        # 倒回重講：跟之前任何一個局面相同（含主線很前面、別的擺局段落、開局）
         anc, k = self.cur.parent, 0
-        while anc is not None and k < 60:
+        while anc is not None:
             if eq(anc.pos.b):
                 return ('back', anc)
             anc, k = anc.parent, k + 1
+        for nd in self.all_nodes:
+            if nd is not self.cur and eq(nd.pos.b):
+                return ('back', nd)
         hit = []
         for mv, q, g in succ:
             for mv2 in q.legal_moves():
@@ -1024,7 +1111,13 @@ class Tracker:
                     hit.append([mv, mv2])
         if len(hit) == 1:
             return ('move', hit[0])
-        return 'ambiguous' if hit else None
+        if hit:
+            return 'ambiguous'
+        # 接續：中間漏看了好幾步（最多 MAX_GAP 步），從目前局面找一條走得到的路
+        path = reach(self.cur.pos, pos, hid, setup=(id(self.cur) in self.setups and not self.cur.children))
+        if path:
+            return ('move', path)
+        return None
 
     def _apply(self, action, t):
         kind, val = action
@@ -1043,6 +1136,7 @@ class Tracker:
                 cn = self.cur.pos.move_cn(mv)
                 node = Node(self.cur.pos.make(mv), mv, cn, self.cur, t)
                 self.cur.children.append(node)
+                self.all_nodes.append(node)
                 self.nodes += 1
             self.cur = node
 
@@ -1320,7 +1414,10 @@ def scan_video(path, step=0.25, persist=2, debug_dir=None, vid='video', lib_dir=
                             last_ok = t
                             if isinstance(act, tuple):
                                 tracker._apply(act, t)
-                                log('    整盤辨識補上棋步 @ %d:%02d' % (int(t) // 60, int(t) % 60))
+                                if act[0] == 'back':
+                                    log('    老師倒回之前的局面重講 @ %d:%02d' % (int(t) // 60, int(t) % 60))
+                                else:
+                                    log('    整盤辨識補上 %d 步棋 @ %d:%02d' % (len(act[1]), int(t) // 60, int(t) % 60))
                             else:
                                 tracker.reanchor(pos, t)
                                 log('    老師擺出新局面 @ %d:%02d，重新認盤（%s）' % (
