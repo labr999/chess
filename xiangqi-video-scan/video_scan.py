@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.4.6'
+VERSION = '1.4.7'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -99,31 +99,43 @@ def list_videos(url, args):
                                 'url': 'https://www.youtube.com/watch?v=' + info['id']}]
 
 
+_NET = {'ipv4': False}
+
+
 def download(video, args, cache_dir):
     import yt_dlp
     hits = glob.glob(os.path.join(cache_dir, video['id'] + '.*'))
     hits = [h for h in hits if not h.endswith('.part')]
     if hits:
         return hits[0]
-    opts = _ydl_opts(args, {
+    base = {
         # 只要畫面，不要聲音；720p 以下就夠辨識
         'format': 'bv*[height<=720][ext=mp4]/bv*[height<=720]/b[height<=720]/b',
         'outtmpl': os.path.join(cache_dir, '%(id)s.%(ext)s'),
         'ignoreerrors': False,
-        'socket_timeout': 60,
-        'retries': 10,
-        'fragment_retries': 10,
-    })
-    for k in range(3):
+        'socket_timeout': 20,
+        'retries': 2,
+        'fragment_retries': 3,
+    }
+    # v1.4.7：連不上就改走 IPv4、縮短等待；兩種都失敗就丟錯，主迴圈會跳下一支
+    tries = [('IPv4', True)] if _NET['ipv4'] else [('預設', False), ('IPv4', True)]
+    last = None
+    for label, v4 in tries:
+        opts = _ydl_opts(args, dict(base, **({'source_address': '0.0.0.0'} if v4 else {})))
         try:
             with yt_dlp.YoutubeDL(opts) as y:
                 y.download([video['url']])
+            if v4 and not _NET['ipv4']:
+                _NET['ipv4'] = True
+                log('    （改走 IPv4 成功，之後的影片都直接用 IPv4）')
+            last = None
             break
         except Exception as e:
-            if k == 2:
-                raise
-            log('    下載逾時或中斷，%d 秒後重試（%s）' % (10 * (k + 1), str(e)[:80]))
-            time.sleep(10 * (k + 1))
+            last = e
+            if not v4:
+                log('    下載連線失敗，改走 IPv4 再試一次（%s）' % str(e)[:80])
+    if last is not None:
+        raise RuntimeError('下載失敗（預設與 IPv4 都連不上），跳過這支：%s' % str(last)[:120])
     hits = [h for h in glob.glob(os.path.join(cache_dir, video['id'] + '.*')) if not h.endswith('.part')]
     if not hits:
         raise RuntimeError('下載失敗')
