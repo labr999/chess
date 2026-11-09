@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.4.5'
+VERSION = '1.4.6'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -1468,11 +1468,14 @@ def title_class(pl_title):
     return side, name
 
 
-def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv_rows, setup=None):
+def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv_rows, setup=None, parent=None, bno=0):
+    """parent：老師擺局分支掛在同支影片的主棋譜（同一檔案、同一筆小棋聖），bno＝分支 1、2、3…"""
     line = [branch_root] + main_line(branch_root)
     cn = [n.cn for n in line]
     if setup is None:
         family, detail = classify_opening(cn)
+    elif parent:
+        family, detail = parent['family'], parent['detail']
     else:
         family, detail = '擺局', '中局擺子'
     final = line[-1].pos
@@ -1480,14 +1483,16 @@ def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv
     res_tag = {'w': '1-0', 'b': '0-1', None: '*'}[win]
     host = '黑方' if grid.flip else '紅方'
     t_side, t_name = title_class(video.get('plTitle')) if setup is None else (None, '')
-    if t_side and t_name:
+    if parent:
+        sub = os.path.dirname(parent['fpath'])
+    elif t_side and t_name:
         detail = t_name  # 依清單標題：先手開局\中砲對鴛鴦砲\結果\
         sub = os.path.join(out_dir, t_side, safe_name(detail), RESULT_DIR[win])
     else:
         sub = os.path.join(out_dir, t_side or SIDE_DIR[host], RESULT_DIR[win], safe_name(detail))
     os.makedirs(sub, exist_ok=True)
     fname = '%s_%s%s.pgn' % (safe_name(video.get('title'), 30), video['id'], ('_%d' % gi) if gi else '')
-    fpath = os.path.join(sub, fname)
+    fpath = parent['fpath'] if parent else os.path.join(sub, fname)
     # 這條分支（含其中的變化）
     if setup is None:
         fake = Node(START)
@@ -1496,9 +1501,13 @@ def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv
     else:
         moves = pgn_moves(setup, 0 if setup.pos.turn == 'w' else 1)
     host = '黑方' if grid.flip else '紅方'
-    with open(fpath, 'w', encoding='utf-8') as f:
+    with open(fpath, 'a' if parent else 'w', encoding='utf-8') as f:
+        if parent:
+            f.write('\n')
         f.write('[Game "Chinese Chess"]\n')
-        f.write('[Event "%s"]\n' % (video.get('title') or '').replace('"', "'"))
+        f.write('[Event "%s"]\n' % ((video.get('title') or '').replace('"', "'") + (('（分支%d）' % bno) if bno else '')))
+        if bno:
+            f.write('[Variation "分支%d"]\n' % bno)
         f.write('[Site "%s"]\n' % video.get('url', ''))
         f.write('[Result "%s"]\n' % res_tag)
         f.write('[Opening "%s"]\n' % detail)
@@ -1509,15 +1518,19 @@ def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv
         f.write('{勝方判定：%s；畫面下方（主播）執%s；退回示範 %d 次}\n' % (reason, host, tracker.takebacks))
         f.write(moves + ' ' + res_tag + '\n')
     csv_rows.append({
-        '結果': RESULT_DIR[win], '開局大類': family, '開局': detail, '主線步數': len(cn),
+        '結果': RESULT_DIR[win], '開局大類': family, '開局': detail + (('／分支%d' % bno) if bno else ''), '主線步數': len(cn),
         '判定依據': reason, '主播執': host, '標題': video.get('title'), '網址': video.get('url', ''),
         '前20步': ' '.join(cn[:20]), '終局FEN': final.fen(), '棋譜檔': os.path.relpath(fpath, out_dir),
         '小棋聖ID': '',
     })
-    log('    → %s｜%s｜%d 步｜%s' % (RESULT_DIR[win], detail, len(cn), reason))
-    if setup is not None and args.upload:
-        log('    （擺局段落只存本機棋譜，不上傳小棋聖）')
-    if args.upload and len(cn) >= 2 and setup is None:
+    info = {'fpath': fpath, 'detail': detail, 'family': family}
+    if bno:
+        log('    → 分支%d（老師擺局，存同一棋譜檔）｜%d 步' % (bno, len(cn)))
+    else:
+        log('    → %s｜%s｜%d 步｜%s' % (RESULT_DIR[win], detail, len(cn), reason))
+    if setup is not None and not parent and args.upload:
+        log('    （沒有主棋譜的擺局段落只存本機，不上傳小棋聖）')
+    if args.upload and len(cn) >= 2 and (setup is None or parent):
         red, black = parse_players(video.get('title'))
         t0 = int(line[0].t)
         yt = str(video.get('url', '')).startswith('http')
@@ -1526,15 +1539,18 @@ def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv
         cn_up = [c.translate(str.maketrans('１２３４５６７８９', '123456789')) for c in cn]
         payload = {
             'red': red, 'black': black, 'result': WIN_TEXT[win],
-            'event': video.get('title') or video['id'],
+            'event': (video.get('title') or video['id']) + (('（分支%d）' % bno) if bno else ''),
             'date': ('%s-%s-%s' % (ud[:4], ud[4:6], ud[6:8])) if len(ud) == 8 else '',
             'year': int(ud[:4]) if len(ud) == 8 else None,
             'opening': detail, 'tokens': cn_up, 'moves': cn_up,
+            'exactMoves': [{'from': [n.move[0][1], n.move[0][0]], 'to': [n.move[1][1], n.move[1][0]], 'notation': c}
+                           for n, c in zip(line, cn_up)] if bno else [],
             'source': 'video-scan', 'format': 'video-scan %s' % VERSION,
             'sourceUrl': url, 'detailUrl': ('%s&t=%ds' % (url, max(0, t0 - 3))) if yt else '',
             'fen': final.fen(), 'validation': reason,
             'rawExport': json.dumps({'videoId': video['id'], 'moveTimes': [round(n.t, 1) for n in line],
-                                     'game': gi, 'host': host, 'takebacks': tracker.takebacks}, ensure_ascii=False),
+                                     'game': parent['gi'] if parent else gi, 'host': host, 'takebacks': tracker.takebacks,
+                                     **({'branch': bno, 'startFen': setup.pos.fen()} if bno else {})}, ensure_ascii=False),
         }
         try:
             gid, dup = upload_game(args.upload, payload)
@@ -1542,6 +1558,7 @@ def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv
             log('    ↑ 已上傳小棋聖（編號 %s%s）' % (gid, '，覆蓋舊的' if dup else ''))
         except Exception as e:
             log('    ✗ 上傳小棋聖失敗：%s（棋譜檔仍在本機，可之後重跑）' % e)
+    return info
 
 
 XQS_DEFAULT = 'https://my-backend-api-1-e19n.onrender.com'
@@ -1827,12 +1844,20 @@ def process(video, path, out_dir, engine, args):
         log('    ✗ 辨識到的步數太少（%d 個局面），略過' % tracker.nodes)
         return 'too_short', rows
     gi = 0
+    main = None
     for br in branches:
-        write_game(out_dir, video, gi, br, grid, tracker, engine, args, rows)
+        info = write_game(out_dir, video, gi, br, grid, tracker, engine, args, rows)
+        if main is None:
+            main = dict(info, gi=gi)
         gi += 1
-    for sg in segs:
-        write_game(out_dir, video, gi, sg.children[0], grid, tracker, engine, args, rows, setup=sg)
-        gi += 1
+    # 老師重新擺盤的段落＝同支影片的分支變化，存進主棋譜同一檔案，依序 分支1、2、3
+    for k, sg in enumerate(segs, 1):
+        if main:
+            write_game(out_dir, video, main['gi'], sg.children[0], grid, tracker, engine, args, rows,
+                       setup=sg, parent=main, bno=k)
+        else:
+            write_game(out_dir, video, gi, sg.children[0], grid, tracker, engine, args, rows, setup=sg)
+            gi += 1
     return 'ok', rows
 
 
