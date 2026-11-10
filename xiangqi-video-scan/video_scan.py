@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.4.7'
+VERSION = '1.4.8'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -2023,7 +2023,7 @@ def main():
         videos = [{'id': q['videoId'], 'title': q.get('title') or q['videoId'],
                    'url': 'https://www.youtube.com/watch?v=' + q['videoId'], 'pl': q['playlistId'],
                    'plTitle': q.get('playlistTitle') or '',
-                   'queued': True} for q in queue_items]
+                   'queued': True, 'redo': bool(q.get('redo'))} for q in queue_items]  # v1.4.8：小棋聖按「重新辨識」
         if args.limit:
             videos = videos[:args.limit]
             log('這一批辨識 %d 支（其餘留在勾選清單，下次再跑）' % len(videos))
@@ -2085,7 +2085,7 @@ def main():
     for i, v in enumerate(videos, 1):
         if i < start:
             continue
-        if (v['id'] in done and not args.redo and done[v['id']].get('status') == 'ok'
+        if (v['id'] in done and not args.redo and not v.get('redo') and done[v['id']].get('status') == 'ok'
                 and v['id'] not in retry):
             log('[%d/%d] 已處理過，略過：%s' % (i, len(videos), v['title']))
             if v.get('queued') and args.upload:
