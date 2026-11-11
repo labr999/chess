@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.4.8'
+VERSION = '1.4.9'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -99,7 +99,17 @@ def list_videos(url, args):
                                 'url': 'https://www.youtube.com/watch?v=' + info['id']}]
 
 
-_NET = {'ipv4': False}
+_NET = {'ipv4': False, 'client': None}
+
+
+class DownloadNetError(RuntimeError):
+    """所有下載方式都連不上影片伺服器（多半是網路／防火牆擋 googlevideo）。"""
+
+
+def _is_net_err(e):
+    t = str(e).lower()
+    return any(k in t for k in ('timed out', 'timeout', 'connection', 'getaddrinfo', 'unreachable',
+                                'refused', 'reset by peer', 'network', 'ssl'))
 
 
 def download(video, args, cache_dir):
@@ -117,25 +127,47 @@ def download(video, args, cache_dir):
         'retries': 2,
         'fragment_retries': 3,
     }
-    # v1.4.7：連不上就改走 IPv4、縮短等待；兩種都失敗就丟錯，主迴圈會跳下一支
-    tries = [('IPv4', True)] if _NET['ipv4'] else [('預設', False), ('IPv4', True)]
-    last = None
-    for label, v4 in tries:
-        opts = _ydl_opts(args, dict(base, **({'source_address': '0.0.0.0'} if v4 else {})))
+    # v1.4.7：連不上就改走 IPv4。
+    # v1.4.9：仍連不上就換 YouTube 播放來源（tv／android_vr／web_safari），每換一次會拿到不同的影片伺服器
+    #         （rr3/rr4 之類的節點連不上時，常可繞開）；成功的方式記住，之後的影片先用它。
+    tries = []
+    if _NET['client'] or _NET['ipv4']:
+        tries.append(('上次成功的方式', _NET['ipv4'], _NET['client']))
+    tries += [('預設', False, None), ('IPv4', True, None),
+              ('換 tv 來源', _NET['ipv4'], 'tv'), ('換 android_vr 來源', _NET['ipv4'], 'android_vr'),
+              ('換 web_safari 來源', _NET['ipv4'], 'web_safari')]
+    seen, last, all_net = set(), None, True
+    for label, v4, client in tries:
+        if (v4, client) in seen:
+            continue
+        seen.add((v4, client))
+        extra = dict(base)
+        if v4:
+            extra['source_address'] = '0.0.0.0'
+        if client:
+            extra['extractor_args'] = {'youtube': {'player_client': [client]}}
+            extra['retries'] = 1
         try:
-            with yt_dlp.YoutubeDL(opts) as y:
+            with yt_dlp.YoutubeDL(_ydl_opts(args, extra)) as y:
                 y.download([video['url']])
-            if v4 and not _NET['ipv4']:
-                _NET['ipv4'] = True
-                log('    （改走 IPv4 成功，之後的影片都直接用 IPv4）')
+            if (v4, client) != (_NET['ipv4'], _NET['client']) and (v4 or client):
+                log('    （%s 成功，之後的影片先用這個方式）' % label)
+            _NET['ipv4'], _NET['client'] = v4, client
             last = None
             break
         except Exception as e:
             last = e
-            if not v4:
-                log('    下載連線失敗，改走 IPv4 再試一次（%s）' % str(e)[:80])
+            if not _is_net_err(e):
+                all_net = False
+            for h in glob.glob(os.path.join(cache_dir, video['id'] + '.*.part')):
+                try:
+                    os.remove(h)
+                except OSError:
+                    pass
+            log('    下載失敗（%s）：%s，換下一種方式' % (label, str(e)[:90]))
     if last is not None:
-        raise RuntimeError('下載失敗（預設與 IPv4 都連不上），跳過這支：%s' % str(last)[:120])
+        msg = '下載失敗（所有方式都連不上），跳過這支：%s' % str(last)[:120]
+        raise (DownloadNetError(msg) if all_net else RuntimeError(msg))
     hits = [h for h in glob.glob(os.path.join(cache_dir, video['id'] + '.*')) if not h.endswith('.part')]
     if not hits:
         raise RuntimeError('下載失敗')
@@ -2082,6 +2114,7 @@ def main():
     retry = engine_error_ids(csv_path) if engine else set()
     if retry:
         log('有 %d 支影片上次「引擎錯誤」，這次會重新判定' % len(retry))
+    net_fail = 0
     for i, v in enumerate(videos, 1):
         if i < start:
             continue
@@ -2091,12 +2124,17 @@ def main():
             if v.get('queued') and args.upload:
                 upload_video_status(args.upload, v['pl'], v['id'], 'ok')  # 移出勾選清單
             continue
+        if net_fail >= 3:
+            log('\n✗ 連續 3 支影片都連不上 YouTube 影片伺服器（googlevideo.com），這台電腦的網路多半擋了 YouTube 下載')
+            log('  （公司／醫院網路常見）。先停在這裡，剩下的影片仍保留勾選；請換到家裡或手機熱點的網路再按 Q 繼續。')
+            break
         log('[%d/%d] %s' % (i, len(videos), v['title']))
         try:
             path = v.get('path') or download(v, args, args.cache)
             status, rows = process(v, path, args.out, engine, args)
             if any((r.get('判定依據') or '').startswith('引擎錯誤') for r in rows):
                 status = 'engine_error'  # 下次自動重跑
+            net_fail = 0
             replace_csv_rows(csv_path, args.out, v['id'], rows)
             if not v.get('path') and not args.keep_video:
                 try:
@@ -2107,6 +2145,7 @@ def main():
             raise
         except Exception as e:
             status = 'error: %s' % e
+            net_fail = net_fail + 1 if isinstance(e, DownloadNetError) else 0
             import traceback
             tb = traceback.extract_tb(e.__traceback__)
             where = ('（%s 第 %d 行）' % (os.path.basename(tb[-1].filename), tb[-1].lineno)) if tb else ''
