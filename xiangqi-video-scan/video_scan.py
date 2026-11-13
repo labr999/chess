@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.4.9'
+VERSION = '1.5.0'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -121,7 +121,8 @@ def download(video, args, cache_dir):
     base = {
         # 只要畫面，不要聲音；720p 以下就夠辨識
         'format': 'bv*[height<=720][ext=mp4]/bv*[height<=720]/b[height<=720]/b',
-        'outtmpl': os.path.join(cache_dir, '%(id)s.%(ext)s'),
+        # v1.5.0：檔名用我們的 id（FB Reels／IG／TikTok 等非 YouTube 影片，yt-dlp 的 id 不同）
+        'outtmpl': os.path.join(cache_dir, video['id'].replace('%', '') + '.%(ext)s'),
         'ignoreerrors': False,
         'socket_timeout': 20,
         'retries': 2,
@@ -1577,8 +1578,9 @@ def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv
     if args.upload and len(cn) >= 2 and (setup is None or parent):
         red, black = parse_players(video.get('title'))
         t0 = int(line[0].t)
-        yt = str(video.get('url', '')).startswith('http')
-        url = ('https://www.youtube.com/watch?v=%s' % video['id']) if yt else ''
+        vurl = str(video.get('url', ''))
+        yt = vurl.startswith('http') and ('youtube.com' in vurl or 'youtu.be' in vurl)
+        url = ('https://www.youtube.com/watch?v=%s' % video['id']) if yt else (vurl if vurl.startswith('http') else '')
         ud = video.get('upload_date') or ''
         cn_up = [c.translate(str.maketrans('１２３４５６７８９', '123456789')) for c in cn]
         payload = {
@@ -2053,7 +2055,7 @@ def main():
     pl_key = None
     if queue_items is not None:
         videos = [{'id': q['videoId'], 'title': q.get('title') or q['videoId'],
-                   'url': 'https://www.youtube.com/watch?v=' + q['videoId'], 'pl': q['playlistId'],
+                   'url': q.get('url') or ('https://www.youtube.com/watch?v=' + q['videoId']), 'pl': q['playlistId'],
                    'plTitle': q.get('playlistTitle') or '',
                    'queued': True, 'redo': bool(q.get('redo'))} for q in queue_items]  # v1.4.8：小棋聖按「重新辨識」
         if args.limit:
