@@ -34,7 +34,7 @@ import numpy as np
 
 from xq_core import Position, START_FEN, classify_opening
 
-VERSION = '1.5.0'
+VERSION = '1.5.1'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.join(BASE_DIR, 'engine')
 START = Position.from_fen(START_FEN)
@@ -1513,7 +1513,7 @@ def title_class(pl_title):
     return side, name
 
 
-def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv_rows, setup=None, parent=None, bno=0):
+def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv_rows, setup=None, parent=None, bno=0, extra=None):
     """parent：老師擺局分支掛在同支影片的主棋譜（同一檔案、同一筆小棋聖），bno＝分支 1、2、3…"""
     line = [branch_root] + main_line(branch_root)
     cn = [n.cn for n in line]
@@ -1561,6 +1561,10 @@ def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv
         f.write('[Annotator "video_scan %s"]\n' % VERSION)
         f.write('[Format "Chinese"]\n')
         f.write('{勝方判定：%s；畫面下方（主播）執%s；退回示範 %d 次}\n' % (reason, host, tracker.takebacks))
+        if extra and extra.get('prefixFrom'):
+            f.write('{前 %d 步取自小棋聖 #%s%s，之後為老師擺子段落}\n' % (
+                extra['prefixPlies'] + extra.get('bridgePlies', 0), extra['prefixFrom'],
+                ('（含補 %d 步）' % extra['bridgePlies']) if extra.get('bridgePlies') else ''))
         f.write(moves + ' ' + res_tag + '\n')
     csv_rows.append({
         '結果': RESULT_DIR[win], '開局大類': family, '開局': detail + (('／分支%d' % bno) if bno else ''), '主線步數': len(cn),
@@ -1574,8 +1578,8 @@ def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv
     else:
         log('    → %s｜%s｜%d 步｜%s' % (RESULT_DIR[win], detail, len(cn), reason))
     if setup is not None and not parent and args.upload:
-        log('    （沒有主棋譜的擺局段落只存本機，不上傳小棋聖）')
-    if args.upload and len(cn) >= 2 and (setup is None or parent):
+        log('    （沒有主棋譜：擺局段落以起始局面上傳，影片放「辨識失敗影片」等之後接上前段）')
+    if args.upload and len(cn) >= 2:
         red, black = parse_players(video.get('title'))
         t0 = int(line[0].t)
         vurl = str(video.get('url', ''))
@@ -1590,13 +1594,16 @@ def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv
             'year': int(ud[:4]) if len(ud) == 8 else None,
             'opening': detail, 'tokens': cn_up, 'moves': cn_up,
             'exactMoves': [{'from': [n.move[0][1], n.move[0][0]], 'to': [n.move[1][1], n.move[1][0]], 'notation': c}
-                           for n, c in zip(line, cn_up)] if bno else [],
+                           for n, c in zip(line, cn_up)] if setup is not None else [],
             'source': 'video-scan', 'format': 'video-scan %s' % VERSION,
             'sourceUrl': url, 'detailUrl': ('%s&t=%ds' % (url, max(0, t0 - 3))) if yt else '',
             'fen': final.fen(), 'validation': reason,
             'rawExport': json.dumps({'videoId': video['id'], 'moveTimes': [round(n.t, 1) for n in line],
                                      'game': parent['gi'] if parent else gi, 'host': host, 'takebacks': tracker.takebacks,
-                                     **({'branch': bno, 'startFen': setup.pos.fen()} if bno else {})}, ensure_ascii=False),
+                                     **({'branch': bno} if bno else {}),
+                                     **({'startFen': setup.pos.fen()} if setup is not None else {}),
+                                     **({'setupOnly': True} if setup is not None and not parent else {}),
+                                     **(extra or {})}, ensure_ascii=False),
         }
         try:
             gid, dup = upload_game(args.upload, payload)
@@ -1605,6 +1612,235 @@ def write_game(out_dir, video, gi, branch_root, grid, tracker, engine, args, csv
         except Exception as e:
             log('    ✗ 上傳小棋聖失敗：%s（棋譜檔仍在本機，可之後重跑）' % e)
     return info
+
+
+# ====================================================================
+# v1.5.1：中局擺子接主棋譜（比對小棋聖所有棋譜走過的局面）
+# ====================================================================
+_CN_NORM = str.maketrans({'俥': '車', '车': '車', '傌': '馬', '马': '馬', '砲': '炮', '包': '炮', '相': '象',
+                          '仕': '士', '帥': '將', '帅': '將', '将': '將', '兵': '卒', '进': '進', '后': '後',
+                          '一': '1', '二': '2', '三': '3', '四': '4', '五': '5', '六': '6', '七': '7', '八': '8',
+                          '九': '9', '１': '1', '２': '2', '３': '3', '４': '4', '５': '5', '６': '6', '７': '7',
+                          '８': '8', '９': '9', ' ': None, '　': None})
+
+
+def cn_norm(t):
+    return str(t or '').translate(_CN_NORM)
+
+
+def replay_cn(tokens, start=None, limit=400):
+    """中文棋譜 → 每步 move；遇到看不懂的步就停。回傳 (moves, positions)。"""
+    pos = start or START
+    mvs, poss = [], [pos]
+    for tok in tokens[:limit]:
+        nt = cn_norm(tok)
+        hit = None
+        for mv in pos._pseudo(pos.turn):
+            try:
+                if cn_norm(pos.move_cn(mv)) != nt:
+                    continue
+            except Exception:
+                continue
+            q = pos.make(mv)
+            if not q.in_check(pos.turn):
+                hit = (mv, q)
+                break
+        if not hit:
+            break
+        mvs.append(hit[0])
+        pos = hit[1]
+        poss.append(pos)
+    return mvs, poss
+
+
+def _game_raw(g):
+    try:
+        return json.loads(g.get('rawExport') or '{}') or {}
+    except Exception:
+        return {}
+
+
+def load_db_lines(args):
+    """讀小棋聖全部棋譜（從開局起的），重播成局面；結果存 _db_lines.json 快取。"""
+    if getattr(args, '_db_lines', None) is not None:
+        return args._db_lines
+    lines = []
+    try:
+        items = _get_json(args.upload, '/api/games?playable=1&limit=10000', timeout=180).get('items') or []
+    except Exception as e:
+        log('    （讀小棋聖棋譜失敗：%s）' % e)
+        args._db_lines = []
+        return []
+    cpath = os.path.join(args.out, '_db_lines.json')
+    try:
+        cache = json.load(open(cpath, encoding='utf-8'))
+    except Exception:
+        cache = {}
+    new_cache = {}
+    for g in items:
+        rx = _game_raw(g)
+        if rx.get('startFen') or rx.get('setupOnly'):
+            continue
+        toks = g.get('tokens') or g.get('moves') or []
+        if len(toks) < 6:
+            continue
+        h = '%s|%d|%s' % (g.get('id'), len(toks), cn_norm(' '.join(toks))[-40:])
+        c = cache.get(str(g.get('id')))
+        if c and c.get('h') == h:
+            iccs = c['m']
+        else:
+            mvs, _ = replay_cn(toks)
+            iccs = [[a, b, c2, d] for (a, b), (c2, d) in mvs]
+        new_cache[str(g.get('id'))] = {'h': h, 'm': iccs}
+        lines.append((g.get('id'), [((a, b), (c2, d)) for a, b, c2, d in iccs]))
+    try:
+        json.dump(new_cache, open(cpath, 'w', encoding='utf-8'))
+    except Exception:
+        pass
+    args._db_lines = lines
+    return lines
+
+
+def _diff(a, b):
+    return [(r, c) for r in range(10) for c in range(9) if a.b[r][c] != b.b[r][c]]
+
+
+def _counts(p):
+    d = {}
+    for row in p.b:
+        for x in row:
+            if x:
+                d[x] = d.get(x, 0) + 1
+    return d
+
+
+def bridge_moves(src, dst, maxd=4):
+    """從 src 用合法著法走到 dst（≤maxd 步），每步都要從不一樣的格子出發。"""
+    def dfs(pos, d):
+        df = _diff(pos, dst)
+        if not df and pos.turn == dst.turn:
+            return []
+        if d == 0 or len(df) > 2 * d:
+            return None
+        sq = set(df)
+        for mv in pos.legal_moves():
+            if mv[0] not in sq:
+                continue
+            r = dfs(pos.make(mv), d - 1)
+            if r is not None:
+                return [mv] + r
+        return None
+    for d in range(1, maxd + 1):
+        r = dfs(src, d)
+        if r is not None:
+            return r
+    return None
+
+
+def connect_setup(target, args, maxd=4, budget=25.0):
+    """找小棋聖棋譜走過 target（或只差 ≤maxd 步）的局面。回傳 {gid, plies, moves, bridge}。"""
+    lines = load_db_lines(args)
+    if not lines:
+        return None
+    tk = target.fen()
+    tc = _counts(target)
+    cands = []
+    for gid, mvs in lines:
+        pos = START
+        for i, mv in enumerate(mvs + [None]):
+            if pos.fen() == tk:
+                return {'gid': gid, 'plies': i, 'moves': mvs[:i], 'bridge': []}
+            pc = _counts(pos)
+            if all(pc.get(k, 0) >= v for k, v in tc.items()):
+                n = len(_diff(pos, target))
+                if n <= 2 * maxd:
+                    cands.append((n, -i, gid, i, mvs[:i], pos))
+            if mv is None:
+                break
+            pos = pos.make(mv)
+    cands.sort(key=lambda x: (x[0], x[1]))
+    t0 = time.time()
+    seen = set()
+    for n, _, gid, i, pre, pos in cands:
+        k = pos.fen()
+        if k in seen:
+            continue
+        seen.add(k)
+        if time.time() - t0 > budget:
+            break
+        br = bridge_moves(pos, target, maxd)
+        if br:
+            return {'gid': gid, 'plies': i, 'moves': pre, 'bridge': br}
+    return None
+
+
+def setup_chain(sg, conn):
+    """開局→小棋聖棋譜前段→補步→擺子段落，接成一條主線。回傳 (第一步節點, rawExport 補充)。"""
+    t = sg.children[0].t if sg.children else sg.t
+    root = Node(START)
+    cur = root
+    for mv in list(conn['moves']) + list(conn['bridge']):
+        nn = Node(cur.pos.make(mv), mv, cur.pos.move_cn(mv), cur, t)
+        cur.children = [nn]
+        cur = nn
+    if cur.pos.fen() != sg.pos.fen():
+        raise RuntimeError('接譜後局面不一致')
+    cur.children = list(sg.children)
+    for ch in cur.children:
+        ch.parent = cur
+    return root.children[0], {'prefixFrom': conn['gid'], 'prefixPlies': conn['plies'],
+                              'bridgePlies': len(conn['bridge'])}
+
+
+def retry_setup_only(args):
+    """之前只上傳擺子段落（setupOnly）的影片，小棋聖有新棋譜後再試接上前段。"""
+    try:
+        items = _get_json(args.upload, '/api/games?limit=10000', timeout=180).get('items') or []
+    except Exception:
+        return 0
+    olds = [g for g in items if g.get('source') == 'video-scan' and _game_raw(g).get('setupOnly')]
+    if not olds:
+        return 0
+    log('檢查 %d 盤「只有中局擺子」的影片棋譜能否接上前段…' % len(olds))
+    n = 0
+    for g in olds:
+        rx = _game_raw(g)
+        try:
+            sp = Position.from_fen(rx['startFen'])
+            ex = g.get('exactMoves') or []
+            if ex:
+                pos, mvs = sp, []
+                for m in ex:
+                    mv = ((m['from'][1], m['from'][0]), (m['to'][1], m['to'][0]))
+                    mvs.append(mv)
+                    pos = pos.make(mv)
+            else:
+                mvs, _ = replay_cn(g.get('tokens') or [], sp)
+            conn = connect_setup(sp, args)
+            if not conn:
+                continue
+            allm = list(conn['moves']) + list(conn['bridge']) + mvs
+            pos, cn = START, []
+            for mv in allm:
+                cn.append(pos.move_cn(mv).translate(str.maketrans('１２３４５６７８９', '123456789')))
+                pos = pos.make(mv)
+            pre = len(conn['moves']) + len(conn['bridge'])
+            times = rx.get('moveTimes') or []
+            nrx = {k: v for k, v in rx.items() if k not in ('setupOnly', 'startFen')}
+            nrx.update({'prefixFrom': conn['gid'], 'prefixPlies': conn['plies'], 'bridgePlies': len(conn['bridge']),
+                        'replaces': g.get('id'), 'moveTimes': [times[0] if times else 0] * pre + list(times)})
+            fam, det = classify_opening(cn)
+            payload = {k: g.get(k) for k in ('red', 'black', 'result', 'event', 'date', 'year', 'sourceUrl',
+                                             'detailUrl', 'validation')}
+            payload.update({'opening': det, 'tokens': cn, 'moves': cn, 'exactMoves': [], 'fen': pos.fen(),
+                            'source': 'video-scan', 'format': 'video-scan %s' % VERSION,
+                            'rawExport': json.dumps(nrx, ensure_ascii=False)})
+            gid, _ = upload_game(args.upload, payload)
+            log('  ✓ #%s 接上 #%s 前段 → 新棋譜 #%s' % (g.get('id'), conn['gid'], gid))
+            n += 1
+        except Exception as e:
+            log('  ✗ #%s 接譜失敗：%s' % (g.get('id'), e))
+    return n
 
 
 XQS_DEFAULT = 'https://my-backend-api-1-e19n.onrender.com'
@@ -1891,20 +2127,33 @@ def process(video, path, out_dir, engine, args):
         return 'too_short', rows
     gi = 0
     main = None
+    status = 'ok'
     for br in branches:
         info = write_game(out_dir, video, gi, br, grid, tracker, engine, args, rows)
         if main is None:
             main = dict(info, gi=gi)
         gi += 1
+    if main is None and segs:
+        # v1.5.1：沒有主棋譜，只有老師擺出的中局 → 找小棋聖走過同一局面的棋譜，把前段接上當主棋譜
+        sg = segs.pop(0)
+        conn = connect_setup(sg.pos, args) if args.upload else None
+        if conn:
+            br, extra = setup_chain(sg, conn)
+            log('    ✓ 擺子局面接上小棋聖 #%s 的前 %d 步%s' % (conn['gid'], conn['plies'],
+                ('，補 %d 步' % len(conn['bridge'])) if conn['bridge'] else ''))
+            info = write_game(out_dir, video, gi, br, grid, tracker, engine, args, rows, extra=extra)
+        else:
+            if args.upload:
+                log('    ✗ 擺子局面在小棋聖找不到可接的棋譜')
+            info = write_game(out_dir, video, gi, sg.children[0], grid, tracker, engine, args, rows, setup=sg)
+            status = 'no_main'
+        main = dict(info, gi=gi)
+        gi += 1
     # 老師重新擺盤的段落＝同支影片的分支變化，存進主棋譜同一檔案，依序 分支1、2、3
     for k, sg in enumerate(segs, 1):
-        if main:
-            write_game(out_dir, video, main['gi'], sg.children[0], grid, tracker, engine, args, rows,
-                       setup=sg, parent=main, bno=k)
-        else:
-            write_game(out_dir, video, gi, sg.children[0], grid, tracker, engine, args, rows, setup=sg)
-            gi += 1
-    return 'ok', rows
+        write_game(out_dir, video, main['gi'], sg.children[0], grid, tracker, engine, args, rows,
+                   setup=sg, parent=main, bno=k)
+    return status, rows
 
 
 PRESET_FILE = os.path.join(BASE_DIR, 'playlists.json')
@@ -2160,6 +2409,11 @@ def main():
     if engine:
         engine.close()
     log('\n完成：%s' % '，'.join('%s %d' % kv for kv in stats.items()))
+    if args.upload:
+        args._db_lines = None  # 這批新上傳的棋譜也拿來比對
+        k = retry_setup_only(args)
+        if k:
+            log('（%d 支只有中局擺子的影片已接上主棋譜，移出辨識失敗清單）' % k)
     log('結果在：%s' % args.out)
 
 
